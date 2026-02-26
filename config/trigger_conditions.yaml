@@ -1,0 +1,34 @@
+# 触发条件配置文件
+# 文件路径: ./config/trigger_conditions.yaml
+
+# 预定义触发条件列表
+trigger_conditions:
+  - name: "Simple Rising Edge"
+    description: "通道1上升沿触发"
+    expression: "CH1 Rising"
+    enabled: false
+
+  - name: "Dual Channel Rising"
+    description: "通道1上升后10ms内通道2也上升"
+    expression: "(CH1 Rising) AND (CH2 Rising within 10ms after CH1 Rising)"
+    enabled: false
+
+  - name: "High Level and Falling"
+    description: "通道3为高电平且通道4下降沿"
+    expression: "(CH3 = High) AND (CH4 Falling)"
+    enabled: false
+
+  - name: "Complex Logic"
+    description: "通道1上升后5ms内通道2上升，或通道3下降后100μs内通道4双边沿"
+    expression: "[(CH1 Rising) AND (CH2 Rising within 5ms after CH1)] OR [(CH3 Falling) AND (CH4 Both Edges within 100μs after CH3)]"
+    enabled: false
+
+  - name: "Channel 4 Falling Edge"
+    description: "通道4下降沿触发"
+    expression: "CH4 Falling"
+    enabled: false
+
+# 当前激活的触发条件
+active_condition:
+  name: "Simple Rising Edge"
+  expression: "CH1 Rising"

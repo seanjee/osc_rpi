@@ -1,0 +1,76 @@
+# Raspberry Pi 5 数字示波器配置文件
+# 文件路径: ./config/osc_config.yaml
+
+# GPIO 通道配置
+gpio_channels:
+  channel1:
+    gpio_pin: 5
+    physical_pin: 29
+    enabled: true
+  channel2:
+    gpio_pin: 6
+    physical_pin: 31
+    enabled: true
+  channel3:
+    gpio_pin: null
+    physical_pin: null
+    enabled: false
+  channel4:
+    gpio_pin: null
+    physical_pin: null
+    enabled: false
+  external_trigger:
+    gpio_pin: null
+    physical_pin: null
+    enabled: false
+
+# 采样配置
+sampling:
+  max_frequency: 1000000  # 1 Msps
+  depth: 100000  # 100k points
+  default_time_scale: 1000  # μs/div
+
+# 界面配置
+display:
+  refresh_rate: 30  # fps
+  grid_visible: true
+  trigger_record_max: 100
+  screenshot_path: "./screenshots/"
+  trigger_log_path: "./logs/trigger_log.csv"
+
+# 触发默认配置
+trigger:
+  default_mode: "Normal"  # Auto, Normal, Single
+  default_channel: 1
+  default_level: 1.65  # V
+  default_edge: "Rising"  # Rising, Falling, Both
+  default_holdoff: 0.001  # s
+
+# 快捷键配置
+hotkeys:
+  channel1: "1"
+  channel2: "2"
+  channel3: "3"
+  channel4: "4"
+  x_scale_up: "Right"
+  x_scale_down: "Left"
+  y_scale_up: "Up"
+  y_scale_down: "Down"
+  x_position_up: "Shift+Right"
+  x_position_down: "Shift+Left"
+  y_position_up: "Shift+Up"
+  y_position_down: "Shift+Down"
+  trig_auto: "A"
+  trig_normal: "N"
+  trig_single: "S"
+  trig_level_up: "W"
+  trig_level_down: "S"
+  fullscreen: "F"
+  help: "H"
+  about: "?"
+
+# 性能配置
+performance:
+  max_cpu_load: 90  # %
+  max_gpu_load: 90  # %
+  target_fps: 30
