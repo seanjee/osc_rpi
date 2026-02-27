@@ -17,17 +17,17 @@ gpio_channels:
     gpio_chip: "/dev/gpiochip4"
     line: 6
   channel3:
-    gpio_pin: 4
-    physical_pin: 7
+    gpio_pin: 23
+    physical_pin: 16
     enabled: true
     gpio_chip: "/dev/gpiochip4"
-    line: 4
+    line: 23
   channel4:
-    gpio_pin: 7
-    physical_pin: 26
+    gpio_pin: 24
+    physical_pin: 18
     enabled: true
     gpio_chip: "/dev/gpiochip4"
-    line: 7
+    line: 24
   external_trigger:
     gpio_pin: 16
     physical_pin: 36

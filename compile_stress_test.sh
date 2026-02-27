@@ -13,7 +13,7 @@ LIB_PATHS=(
 
 CXX=g++
 CXXFLAGS="-std=c++17 -O2 -pthread"
-LDFLAGS="-lgpiod -pthread"
+LDFLAGS="-lgpiodcxx -lgpiod -pthread"
 
 # Find libgpiod
 GPIOD_LIB=""

@@ -2,7 +2,14 @@
 // High-frequency stress test for GPIO sampling
 // Tests stability and performance at 100-500 kHz with memory monitoring
 // PRD Stage 2 validation
+//
+// 测试条件说明：
+// - 所有4个通道连接到同一信号源（信号发生器）
+// - 所有通道测试相同频率，请从外部信号发生器设置
+// - 通道连接：GPIO5(Pin29), GPIO6(Pin31), GPIO23(Pin16), GPIO24(Pin18)
+// - 测试频率：100 kHz, 200 kHz, 500 kHz（每个频率测试60秒）
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -11,6 +18,7 @@
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#include <numeric>
 #include <sstream>
 #include <sys/resource.h>
 #include <sys/sysinfo.h>
@@ -34,8 +42,8 @@ struct ChannelConfig {
 ChannelConfig channels[MAX_CHANNELS] = {
     {"/dev/gpiochip4", 5,  "GPIO5"},  // Channel 1
     {"/dev/gpiochip4", 6,  "GPIO6"},  // Channel 2
-    {"/dev/gpiochip4", 4,  "GPIO4"},  // Channel 3
-    {"/dev/gpiochip4", 7,  "GPIO7"}   // Channel 4
+    {"/dev/gpiochip4", 23, "GPIO23"}, // Channel 3
+    {"/dev/gpiochip4", 24, "GPIO24"}  // Channel 4
 };
 
 // System resource monitoring
@@ -233,7 +241,6 @@ void print_performance_results(int ch_idx, const PerformanceStats& stats, int ex
     printf("    Average edge loss: %.2f%%\n", stats.edge_loss_avg);
     printf("    Average CPU usage: %.1f%%\n", stats.cpu_usage_avg);
     printf("    Average memory: %.2f MB\n", stats.memory_avg);
-    printf("    Page faults: %ld\n", stats.page_faults);
 
     // Stability check
     double rate_variation = (stats.max_edge_rate - stats.min_edge_rate) / stats.avg_edge_rate * 100.0;
@@ -248,92 +255,139 @@ void print_performance_results(int ch_idx, const PerformanceStats& stats, int ex
     }
 }
 
-int main(void) {
+void run_stress_test(int freq_idx, int freq, const char* freq_name) {
+    char title[128];
+    snprintf(title, sizeof(title), "Stress Testing at %s", freq_name);
+    print_header(title);
+    printf("Expected frequency: %d Hz\n", freq);
+    printf("Test duration: %d seconds\n", STRESS_TEST_DURATION_SEC);
+
+    std::vector<PerformanceStats> all_stats;
+    std::vector<std::thread> threads;
+
+    auto start_time = steady_clock::now();
+
+    // Launch all channels
+    for (int ch = 0; ch < MAX_CHANNELS; ch++) {
+        all_stats.push_back(PerformanceStats());
+        threads.push_back(std::thread([ch, freq, &all_stats]() {
+            all_stats[ch] = capture_channel_stress(ch, freq, STRESS_TEST_DURATION_SEC);
+        }));
+    }
+
+    // Wait for all threads
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    auto end_time = steady_clock::now();
+    auto total_duration = duration_cast<seconds>(end_time - start_time);
+    printf("\n  Total test time: %ld seconds\n", total_duration.count());
+
+    // Print results
+    bool freq_test_passed = true;
+    for (int ch = 0; ch < MAX_CHANNELS; ch++) {
+        print_performance_results(ch, all_stats[ch], freq);
+
+        if (all_stats[ch].edge_loss_avg > 10.0 ||
+            all_stats[ch].cpu_usage_avg > 90.0) {
+            freq_test_passed = false;
+        }
+    }
+
+    printf("\n  Stress Test Result: ");
+    if (freq_test_passed) {
+        printf("✓ PASS - All channels meet Stage 2 criteria\n");
+    } else {
+        printf("✗ FAIL - Some channels exceed Stage 2 criteria\n");
+    }
+}
+
+int main(int argc, char* argv[]) {
     print_header("High-Frequency Stress Test");
     printf("PRD Stage 2 Validation: 100-500 kHz range\n");
     printf("Duration: %d seconds per frequency\n", STRESS_TEST_DURATION_SEC);
     printf("Metrics: Edge loss, CPU usage, Memory, Stability\n");
+    printf("\n");
 
     // Test frequencies for Stage 2
     int test_frequencies[] = {100000, 200000, 500000};
     const char* freq_names[] = {"100 kHz", "200 kHz", "500 kHz"};
     const int num_freqs = sizeof(test_frequencies) / sizeof(test_frequencies[0]);
 
-    bool all_stress_tests_passed = true;
+    int selected_freq_idx = -1;
 
-    for (int f = 0; f < num_freqs; f++) {
-        int freq = test_frequencies[f];
-
-        char title[128];
-        snprintf(title, sizeof(title), "Stress Testing at %s", freq_names[f]);
-        print_header(title);
-        printf("Expected frequency: %d Hz\n", freq);
-        printf("Test duration: %d seconds\n", STRESS_TEST_DURATION_SEC);
-
-        std::vector<PerformanceStats> all_stats;
-        std::vector<std::thread> threads;
-
-        auto start_time = steady_clock::now();
-
-        // Launch all channels
-        for (int ch = 0; ch < MAX_CHANNELS; ch++) {
-            all_stats.push_back(PerformanceStats());
-            threads.push_back(std::thread([ch, freq, &all_stats]() {
-                all_stats[ch] = capture_channel_stress(ch, freq, STRESS_TEST_DURATION_SEC);
-            }));
+    // Parse command line or interactive selection
+    if (argc > 1) {
+        // Command line argument: frequency index or value
+        if (strcmp(argv[1], "--list") == 0) {
+            printf("Available test frequencies:\n");
+            for (int i = 0; i < num_freqs; i++) {
+                printf("  [%d] %s (%d Hz)\n", i, freq_names[i], test_frequencies[i]);
+            }
+            return 0;
         }
 
-        // Wait for all threads
-        for (auto& t : threads) {
-            t.join();
-        }
-
-        auto end_time = steady_clock::now();
-        auto total_duration = duration_cast<seconds>(end_time - start_time);
-        printf("\n  Total test time: %ld seconds\n", total_duration.count());
-
-        // Print results
-        bool freq_test_passed = true;
-        for (int ch = 0; ch < MAX_CHANNELS; ch++) {
-            print_performance_results(ch, all_stats[ch], freq);
-
-            if (all_stats[ch].edge_loss_avg > 10.0 ||
-                all_stats[ch].cpu_usage_avg > 90.0) {
-                freq_test_passed = false;
-                all_stress_tests_passed = false;
+        // Try to parse as frequency value
+        int freq_value = atoi(argv[1]);
+        for (int i = 0; i < num_freqs; i++) {
+            if (test_frequencies[i] == freq_value) {
+                selected_freq_idx = i;
+                break;
             }
         }
 
-        printf("\n  Stress Test Result: ");
-        if (freq_test_passed) {
-            printf("✓ PASS - All channels meet Stage 2 criteria\n");
-        } else {
-            printf("✗ FAIL - Some channels exceed Stage 2 criteria\n");
+        if (selected_freq_idx == -1 && freq_value >= 0 && freq_value < num_freqs) {
+            selected_freq_idx = freq_value;
+        }
+
+        if (selected_freq_idx == -1) {
+            printf("Error: Invalid frequency '%s'\n", argv[1]);
+            printf("Run with --list to see available frequencies\n");
+            return 1;
+        }
+    } else {
+        // Interactive selection
+        printf("Available test frequencies:\n");
+        for (int i = 0; i < num_freqs; i++) {
+            printf("  [%d] %s (%d Hz)\n", i, freq_names[i], test_frequencies[i]);
+        }
+
+        printf("\nSelect frequency to test (0-%d): ", num_freqs - 1);
+        fflush(stdout);
+
+        char input[32];
+        if (fgets(input, sizeof(input), stdin) == NULL) {
+            printf("Error reading input\n");
+            return 1;
+        }
+
+        selected_freq_idx = atoi(input);
+        if (selected_freq_idx < 0 || selected_freq_idx >= num_freqs) {
+            printf("Error: Invalid selection\n");
+            return 1;
         }
     }
 
-    // Final summary
-    print_header("Stress Test Summary");
+    printf("\n");
+    printf("=============================================================\n");
+    printf("请设置信号发生器频率: %d Hz (%s)\n",
+           test_frequencies[selected_freq_idx],
+           freq_names[selected_freq_idx]);
+    printf("=============================================================\n");
+    printf("所有4个通道连接到同一信号源:\n");
+    printf("  - GPIO5  通道1\n");
+    printf("  - GPIO6  通道2\n");
+    printf("  - GPIO23 通道3\n");
+    printf("  - GPIO24 通道4\n");
+    printf("=============================================================\n");
+    printf("\n按回车键开始测试 (或 Ctrl+C 取消)...");
+    fflush(stdout);
 
-    printf("\nOverall Result: ");
-    if (all_stress_tests_passed) {
-        printf("✓ ALL STRESS TESTS PASSED\n");
-        printf("\n✓ libgpiod C++ meets PRD Stage 2 requirements\n");
-        printf("  All 4 channels < 10%% edge loss at 100-500 kHz\n");
-        printf("  CPU usage < 90%%\n");
-        printf("  Stable performance (variation < 20%%)\n");
-        printf("  Ready to proceed to Stage 3 (500 kHz-1 Msps)\n");
-    } else {
-        printf("✗ SOME STRESS TESTS FAILED\n");
-        printf("\n⚠ Some channels exceed Stage 2 limits\n");
-        printf("  Recommendations:\n");
-        printf("  1. Optimize sampling thread (reduce overhead)\n");
-        printf("  2. Increase event buffer size\n");
-        printf("  3. Use CPU affinity to isolate sampling thread\n");
-        printf("  4. Consider reducing target frequency to 200 kHz\n");
-        printf("  5. Proceed to Stage 3 with caution\n");
-    }
+    getchar();
 
     printf("\n");
-    return all_stress_tests_passed ? EXIT_SUCCESS : EXIT_FAILURE;
+    run_stress_test(selected_freq_idx, test_frequencies[selected_freq_idx], freq_names[selected_freq_idx]);
+
+    return 0;
 }

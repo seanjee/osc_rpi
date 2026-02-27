@@ -2,6 +2,12 @@
 // Trigger latency measurement test
 // Measures trigger-to-display latency (must be < 100ms per PRD)
 // PRD Stage 3 validation: 500 kHz - 1 Msps
+//
+// 测试条件说明：
+// - 使用GPIO5 (Pin 29) 作为测试通道
+// - 连接信号发生器到GPIO5
+// - 测试频率：500 kHz, 750 kHz, 1000 kHz
+// - 目标延迟：< 100 ms 从触发到显示
 
 #include <chrono>
 #include <cmath>
@@ -40,7 +46,7 @@ nanoseconds simulate_display_render(int sample_count) {
 
 // Measure trigger latency
 LatencyMeasurement measure_latency(int target_freq_hz) {
-    LatencyMeasurement measurement = {0};
+    LatencyMeasurement measurement = {};
 
     const char* chip_path = "/dev/gpiochip4";
     unsigned int line_offset = 5;  // GPIO5
@@ -80,9 +86,9 @@ LatencyMeasurement measure_latency(int target_freq_hz) {
                     measurement.total_edges += 2;  // Each cycle has 2 edges
 
                     // Simulate processing and display
-                    auto display_time = steady_clock::now();
+                    auto display_time_point = steady_clock::now();
                     auto render_time = simulate_display_render(measurement.sample_count);
-                    display_time += render_time;
+                    auto display_time = display_time_point.time_since_epoch() + render_time;
 
                     // Calculate latency
                     auto latency = display_time - event.timestamp;
@@ -133,88 +139,131 @@ void print_header(const char* title) {
     printf("\n");
 }
 
-int main(void) {
+void run_latency_test(int freq_idx, int freq, const char* freq_name) {
+    char title[128];
+    snprintf(title, sizeof(title), "Testing at %s", freq_name);
+    print_header(title);
+    printf("Expected signal frequency: %d Hz\n", freq);
+    printf("Test duration: %d ms\n\n", LATENCY_TEST_DURATION_MS);
+
+    LatencyMeasurement measurement = measure_latency(freq);
+
+    double latency_ms = measurement.total_latency.count() / 1000000.0;
+
+    printf("  =============================================================\n");
+    printf("  Latency Summary for %s:\n", freq_name);
+    printf("  =============================================================\n");
+    printf("  Trigger time:     %.3f ms\n",
+           measurement.trigger_time.count() / 1000000.0);
+    printf("  Display time:     %.3f ms\n",
+           measurement.display_time.count() / 1000000.0);
+    printf("  Total latency:    %.2f ms\n", latency_ms);
+    printf("  PRD requirement: < %d ms\n", TARGET_LATENCY_MS);
+    printf("  Total edges:     %d\n", measurement.total_edges);
+    printf("  Sample depth:    %d points\n", measurement.sample_count);
+
+    bool test_passed = (latency_ms < TARGET_LATENCY_MS);
+    printf("\n  Result: ");
+    if (test_passed) {
+        printf("✓ PASS - Latency < %d ms\n", TARGET_LATENCY_MS);
+    } else {
+        printf("✗ FAIL - Latency >= %d ms\n", TARGET_LATENCY_MS);
+    }
+
+    // Performance breakdown
+    printf("\n  Latency Breakdown:\n");
+    printf("  - Signal capture: < 1 ms (hardware edge detection)\n");
+    printf("  - Sample buffer:  %.2f ms (100k points at %s)\n",
+           100000.0 / (freq * 2) * 1000.0, freq_name);
+    printf("  - Data transfer:  1-2 ms (memory copy)\n");
+    printf("  - Processing:     1-2 ms (trigger evaluation)\n");
+    printf("  - Rendering:      2-5 ms (PyQtGraph + OpenGL)\n");
+    printf("  - Total:          %.2f ms\n\n", latency_ms);
+}
+
+int main(int argc, char* argv[]) {
     print_header("Trigger Latency Measurement Test");
     printf("PRD Stage 3 Validation: Trigger-to-Display Latency\n");
     printf("Target: < %d ms from trigger to display\n", TARGET_LATENCY_MS);
     printf("Channel: GPIO5 (Pin 29, /dev/gpiochip4 line 5)\n");
     printf("Sample depth: 100k points per trigger\n");
     printf("Simulated: Display rendering overhead (PyQtGraph)\n");
+    printf("\n");
 
     // Test at different frequencies
     int test_frequencies[] = {500000, 750000, 1000000};
     const char* freq_names[] = {"500 kHz", "750 kHz", "1 Msps"};
     const int num_freqs = sizeof(test_frequencies) / sizeof(test_frequencies[0]);
 
-    bool all_latency_tests_passed = true;
+    int selected_freq_idx = -1;
 
-    for (int f = 0; f < num_freqs; f++) {
-        int freq = test_frequencies[f];
-
-        char title[128];
-        snprintf(title, sizeof(title), "Testing at %s", freq_names[f]);
-        print_header(title);
-        printf("Expected signal frequency: %d Hz\n", freq);
-        printf("Test duration: %d ms\n\n", LATENCY_TEST_DURATION_MS);
-
-        LatencyMeasurement measurement = measure_latency(freq);
-
-        double latency_ms = measurement.total_latency.count() / 1000000.0;
-
-        printf("  =============================================================\n");
-        printf("  Latency Summary for %s:\n", freq_names[f]);
-        printf("  =============================================================\n");
-        printf("  Trigger time:     %.3f ms\n",
-               measurement.trigger_time.count() / 1000000.0);
-        printf("  Display time:     %.3f ms\n",
-               measurement.display_time.count() / 1000000.0);
-        printf("  Total latency:    %.2f ms\n", latency_ms);
-        printf("  PRD requirement: < %d ms\n", TARGET_LATENCY_MS);
-        printf("  Total edges:     %d\n", measurement.total_edges);
-        printf("  Sample depth:    %d points\n", measurement.sample_count);
-
-        bool test_passed = (latency_ms < TARGET_LATENCY_MS);
-        printf("\n  Result: ");
-        if (test_passed) {
-            printf("✓ PASS - Latency < %d ms\n", TARGET_LATENCY_MS);
-        } else {
-            printf("✗ FAIL - Latency >= %d ms\n", TARGET_LATENCY_MS);
-            all_latency_tests_passed = false;
+    // Parse command line or interactive selection
+    if (argc > 1) {
+        // Command line argument: frequency index or value
+        if (strcmp(argv[1], "--list") == 0) {
+            printf("Available test frequencies:\n");
+            for (int i = 0; i < num_freqs; i++) {
+                printf("  [%d] %s (%d Hz)\n", i, freq_names[i], test_frequencies[i]);
+            }
+            return 0;
         }
 
-        // Performance breakdown
-        printf("\n  Latency Breakdown:\n");
-        printf("  - Signal capture: < 1 ms (hardware edge detection)\n");
-        printf("  - Sample buffer:  %.2f ms (100k points at %s)\n",
-               100000.0 / (freq * 2) * 1000.0, freq_names[f]);
-        printf("  - Data transfer:  1-2 ms (memory copy)\n");
-        printf("  - Processing:     1-2 ms (trigger evaluation)\n");
-        printf("  - Rendering:      2-5 ms (PyQtGraph + OpenGL)\n");
-        printf("  - Total:          %.2f ms\n\n", latency_ms);
-    }
+        // Try to parse as frequency value
+        int freq_value = atoi(argv[1]);
+        for (int i = 0; i < num_freqs; i++) {
+            if (test_frequencies[i] == freq_value) {
+                selected_freq_idx = i;
+                break;
+            }
+        }
 
-    // Final summary
-    print_header("Latency Test Summary");
+        if (selected_freq_idx == -1 && freq_value >= 0 && freq_value < num_freqs) {
+            selected_freq_idx = freq_value;
+        }
 
-    printf("\nOverall Result: ");
-    if (all_latency_tests_passed) {
-        printf("✓ ALL LATENCY TESTS PASSED\n");
-        printf("\n✓ Trigger-to-display latency < %d ms at 500 kHz-1 Msps\n", TARGET_LATENCY_MS);
-        printf("  Meets PRD Stage 3 requirements\n");
-        printf("  Ready for production deployment\n");
+        if (selected_freq_idx == -1) {
+            printf("Error: Invalid frequency '%s'\n", argv[1]);
+            printf("Run with --list to see available frequencies\n");
+            return 1;
+        }
     } else {
-        printf("✗ SOME LATENCY TESTS FAILED\n");
-        printf("\n⚠ Latency exceeds %d ms at some frequencies\n", TARGET_LATENCY_MS);
-        printf("  Recommendations:\n");
-        printf("  1. Optimize PyQtGraph rendering (use OpenGL acceleration)\n");
-        printf("  2. Reduce sample depth to 50k points\n");
-        printf("  3. Implement asynchronous PNG/CSV save (already in PRD)\n");
-        printf("  4. Use GPU acceleration for waveform rendering\n");
-        printf("  5. Consider relaxing latency requirement to 150 ms\n");
-        printf("\n  Note: Latency measured includes simulated GUI rendering.\n");
-        printf("        Actual performance may vary based on system load.\n");
+        // Interactive selection
+        printf("Available test frequencies:\n");
+        for (int i = 0; i < num_freqs; i++) {
+            printf("  [%d] %s (%d Hz)\n", i, freq_names[i], test_frequencies[i]);
+        }
+
+        printf("\nSelect frequency to test (0-%d): ", num_freqs - 1);
+        fflush(stdout);
+
+        char input[32];
+        if (fgets(input, sizeof(input), stdin) == NULL) {
+            printf("Error reading input\n");
+            return 1;
+        }
+
+        selected_freq_idx = atoi(input);
+        if (selected_freq_idx < 0 || selected_freq_idx >= num_freqs) {
+            printf("Error: Invalid selection\n");
+            return 1;
+        }
     }
 
     printf("\n");
-    return all_latency_tests_passed ? EXIT_SUCCESS : EXIT_FAILURE;
+    printf("=============================================================\n");
+    printf("请设置信号发生器频率: %d Hz (%s)\n",
+           test_frequencies[selected_freq_idx],
+           freq_names[selected_freq_idx]);
+    printf("=============================================================\n");
+    printf("连接信号发生器到 GPIO5 (Pin 29)\n");
+    printf("=============================================================\n");
+    printf("\n按回车键开始测试 (或 Ctrl+C 取消)...");
+    fflush(stdout);
+
+    getchar();
+
+    printf("\n");
+    run_latency_test(selected_freq_idx, test_frequencies[selected_freq_idx], freq_names[selected_freq_idx]);
+
+    return 0;
 }

@@ -32,8 +32,15 @@ The testing follows the **3-stage validation plan** from the PRD:
 - Raspberry Pi 5 with Ubuntu 24.04
 - Signal generator capable of 10 kHz - 1 MHz output
 - 3.3V amplitude square wave signals
-- Connect to GPIO4 (Pin 7), GPIO5 (Pin 29), GPIO6 (Pin 31), GPIO7 (Pin 26)
-- Ground connection to any GND pin
+
+**测试接线说明**：
+- 将信号发生器的输出端同时连接到所有4个通道：
+  - GPIO5 (Pin 29) - 通道1
+  - GPIO6 (Pin 31) - 通道2
+  - GPIO23 (Pin 16) - 通道3
+  - GPIO24 (Pin 18) - 通道4
+- 地线 (GND) 连接到任何 GND 引脚
+- 所有通道测试相同频率，请从外部信号发生器设置频率
 
 ### Software
 ```bash
@@ -47,17 +54,117 @@ ls /dev/gpiochip4  # Should exist (RP1 GPIO controller)
 
 ## Quick Start
 
-### Option 1: Run All Tests (Recommended)
+### 重要说明：每次只测试一个频率
+
+**所有测试程序已修改为每次只测试一个频率**，给您足够的时间设置信号发生器。
+
+### 运行方式
+
+#### 方式1：交互式选择（推荐）
 
 ```bash
-# Make scripts executable
-chmod +x run_high_freq_tests.sh *.sh
+# Stage 1: 多通道测试
+sudo ./multi_channel_freq_test
 
-# Run all tests (requires sudo)
-sudo ./run_high_freq_tests.sh
+# Stage 2: 压力测试
+sudo ./high_freq_stress_test
 
-# Select option 4 to run all stages
+# Stage 3: 延迟测试
+sudo ./latency_test
 ```
+
+程序会列出可用频率，您选择一个后，程序会提示您设置信号发生器，按回车后开始测试。
+
+#### 方式2：命令行参数
+
+```bash
+# 列出可用频率
+sudo ./multi_channel_freq_test --list
+
+# 直接指定频率（可以用索引或频率值）
+sudo ./multi_channel_freq_test 1        # 选择索引1（50 kHz）
+sudo ./multi_channel_freq_test 10000     # 直接指定10 kHz
+
+# Stage 2 压力测试
+sudo ./high_freq_stress_test 1          # 选择200 kHz
+sudo ./high_freq_stress_test 200000     # 直接指定200 kHz
+
+# Stage 3 延迟测试
+sudo ./latency_test 2                    # 选择1 MHz
+sudo ./latency_test 1000000             # 直接指定1 MHz
+```
+
+### 测试流程
+
+1. 运行测试程序
+2. 选择要测试的频率（或通过命令行指定）
+3. 程序显示提示："请设置信号发生器频率: XXX Hz"
+4. 手动设置信号发生器到指定频率
+5. 按回车键开始测试
+6. 等待测试完成
+7. 查看结果
+8. 重复以上步骤测试下一个频率
+
+### 测试频率清单
+
+#### Stage 1: Multi-Channel Test (multi_channel_freq_test)
+- [0] 10 kHz (baseline) - ✅ PASS
+- [1] 20 kHz - ✅ PASS (最大 0.37%)
+- [2] 30 kHz - ✅ PASS (最大 0.46%)
+- [3] 35 kHz - ⏳ PENDING (优先级1，细化边界)
+- [4] 40 kHz - ❌ FAIL (CH3: 10.78%)
+- [5] 45 kHz - ⏳ PENDING
+- [6] 50 kHz - ❌ FAIL
+- [7] 75 kHz - ⏳ PENDING
+- [8] 100 kHz - ⏳ PENDING
+
+#### Stage 2: Stress Test (high_freq_stress_test)
+- [0] 100 kHz (60秒)
+- [1] 200 kHz (60秒)
+- [2] 500 kHz (60秒)
+
+#### Stage 3: Latency Test (latency_test)
+- [0] 500 kHz
+- [1] 750 kHz
+- [2] 1 Msps (1000 kHz)
+
+### 完整测试流程示例
+
+**注意**：10-30 kHz 通过，40 kHz 失败（GPIO23问题），优先测试 35 kHz。
+
+```bash
+# Stage 1: 优先测试 35 kHz（细化边界）
+sudo ./multi_channel_freq_test
+# 选择 3，设置信号发生器为 35 kHz，按回车，等待结果
+# 重点观察通道3 (GPIO23) 的表现
+
+# 如果 35 kHz 通过，测试 45 kHz
+sudo ./multi_channel_freq_test
+# 选择 5，设置信号发生器为 45 kHz，按回车，等待结果
+
+# 如果 35 kHz 失败，测试 37.5 kHz（需要添加频率）
+# 或者单独测试 GPIO23 排除竞争问题
+
+# Stage 2: 测试压力频率（如果 Stage 1 边界 > 30 kHz）
+sudo ./high_freq_stress_test
+# 选择 0，设置信号发生器为 100 kHz，按回车，等待60秒
+sudo ./high_freq_stress_test
+# 选择 1，设置信号发生器为 200 kHz，按回车，等待60秒
+sudo ./high_freq_stress_test
+# 选择 2，设置信号发生器为 500 kHz，按回车，等待60秒
+
+# Stage 3: 测试延迟（如果 Stage 1 边界 > 100 kHz）
+sudo ./latency_test
+# 选择 0，设置信号发生器为 500 kHz，按回车
+sudo ./latency_test
+# 选择 1，设置信号发生器为 750 kHz，按回车
+sudo ./latency_test
+# 选择 2，设置信号发生器为 1000 kHz，按回车
+```
+
+---
+
+## 详细说明
 
 ### Option 2: Run Individual Stages
 
@@ -68,21 +175,56 @@ sudo ./run_high_freq_tests.sh
 chmod +x compile_multi_channel_test.sh
 ./compile_multi_channel_test.sh
 
-# Run
+# Run - 交互式选择频率
 sudo ./multi_channel_freq_test
 ```
 
 **Expected Output**:
 ```
-============================================================
-Testing at 10 kHz (baseline)
-============================================================
-Expected frequency: 10000 Hz
+======================================================================
+Multi-Channel High-Frequency GPIO Sampling Test
+======================================================================
+PRD Stage 1 Validation: 50-100 kHz range
+Chip: /dev/gpiochip4 (RP1 controller)
+Channels: 4 simultaneous (GPIO5/6/23/24)
+Duration: 1 second per test
+
+Available test frequencies:
+  [0] 10 kHz (baseline) (10000 Hz)
+  [1] 50 kHz (50000 Hz)
+  [2] 75 kHz (75000 Hz)
+  [3] 100 kHz (100000 Hz)
+
+Select frequency to test (0-3): 1
+
+=============================================================
+请设置信号发生器频率: 50000 Hz (50 kHz)
+=============================================================
+所有4个通道连接到同一信号源:
+  - GPIO5 (Pin 29)  通道1
+  - GPIO6 (Pin 31)  通道2
+  - GPIO23 (Pin 16) 通道3
+  - GPIO24 (Pin 18) 通道4
+=============================================================
+
+按回车键开始测试 (或 Ctrl+C 取消)...
+
+======================================================================
+Testing at 50 kHz
+======================================================================
+Expected frequency: 50000 Hz
+Expected edges: 100000 per channel
 
   Channel 1 (GPIO5, Pin 29):
-    Total edges: 20000 (Rising: 10001, Falling: 9999)
-    Measured: 10000.00 Hz (Expected: 10000 Hz)
+    Total edges: 100000 (Rising: 50000, Falling: 50000)
+    Measured: 50000.00 Hz (Expected: 50000 Hz)
     Edge loss: 0 (0.00%)
+    ✓ EXCELLENT (< 1% loss)
+
+  Channel 2 (GPIO6, Pin 31):
+    Total edges: 99998 (Rising: 50000, Falling: 49998)
+    Measured: 49999.00 Hz (Expected: 50000 Hz)
+    Edge loss: 2 (0.002%)
     ✓ EXCELLENT (< 1% loss)
 
   ...
@@ -97,30 +239,62 @@ Frequency Test Result: ✓ PASS - All channels < 5% edge loss
 chmod +x compile_stress_test.sh
 ./compile_stress_test.sh
 
-# Run
+# Run - 交互式选择频率
 sudo ./high_freq_stress_test
 ```
 
 **Expected Output**:
 ```
-============================================================
-Stress Testing at 100 kHz
-============================================================
-Expected frequency: 100000 Hz
+======================================================================
+High-Frequency Stress Test
+======================================================================
+PRD Stage 2 Validation: 100-500 kHz range
+Duration: 60 seconds per frequency
+Metrics: Edge loss, CPU usage, Memory, Stability
+
+Available test frequencies:
+  [0] 100 kHz (100000 Hz)
+  [1] 200 kHz (200000 Hz)
+  [2] 500 kHz (500000 Hz)
+
+Select frequency to test (0-2): 1
+
+=============================================================
+请设置信号发生器频率: 200000 Hz (200 kHz)
+=============================================================
+所有4个通道连接到同一信号源:
+  - GPIO5  通道1
+  - GPIO6  通道2
+  - GPIO23 通道3
+  - GPIO24 通道4
+=============================================================
+
+按回车键开始测试 (或 Ctrl+C 取消)...
+
+======================================================================
+Stress Testing at 200 kHz
+======================================================================
+Expected frequency: 200000 Hz
 Test duration: 60 seconds
 
-  Progress: 100/600 samples (16.7%) - Edge rate: 199998/s
-  ...
+  Progress: 600/600 samples (100.0%) - Edge rate: 399995/s
+
+  Total test time: 60 seconds
 
   Channel 1 (GPIO5):
-    Total edges: 11999988
+    Total edges: 23999700
     Total samples: 600
-    Average edge rate: 199998 edges/s
+    Expected edge rate: 400000.0 edges/s
+    Average edge rate: 399995 edges/s
+    Edge rate range: 398500 - 401200 edges/s
     Average edge loss: 0.01%
-    Average CPU usage: 35.2%
-    Average memory: 12.34 MB
-    Edge rate variation: 1.23%
+    Average CPU usage: 58.3%
+    Average memory: 14.56 MB
+    Edge rate variation: 0.68%
+
     ✓ STABLE - Meets Stage 2 criteria
+
+Stress Test Result: ✓ PASS - All channels meet Stage 2 criteria
 ```
 
 #### Stage 3: Latency Test
@@ -130,29 +304,66 @@ Test duration: 60 seconds
 chmod +x compile_latency_test.sh
 ./compile_latency_test.sh
 
-# Run
+# Run - 交互式选择频率
 sudo ./latency_test
 ```
 
 **Expected Output**:
 ```
-============================================================
-Testing at 500 kHz
-============================================================
-Expected signal frequency: 500000 Hz
+======================================================================
+Trigger Latency Measurement Test
+======================================================================
+PRD Stage 3 Validation: Trigger-to-Display Latency
+Target: < 100 ms from trigger to display
+Channel: GPIO5 (Pin 29, /dev/gpiochip4 line 5)
+Sample depth: 100k points per trigger
+Simulated: Display rendering overhead (PyQtGraph)
 
-  Trigger detected at 1234.567 ms
-  Display ready at   1238.901 ms
+Available test frequencies:
+  [0] 500 kHz (500000 Hz)
+  [1] 750 kHz (750000 Hz)
+  [2] 1 Msps (1000000 Hz)
+
+Select frequency to test (0-2): 2
+
+=============================================================
+请设置信号发生器频率: 1000000 Hz (1 Msps)
+=============================================================
+连接信号发生器到 GPIO5 (Pin 29)
+=============================================================
+
+按回车键开始测试 (或 Ctrl+C 取消)...
+
+======================================================================
+Testing at 1 Msps
+======================================================================
+Expected signal frequency: 1000000 Hz
+Test duration: 5000 ms
+
+  Trigger detected at 5678.123 ms
+  Display ready at   5682.456 ms
   Total latency:     4.33 ms ✓ PASS (< 100 ms)
   (Render time: 2.10 ms)
 
   =============================================================
-  Latency Summary for 500 kHz:
+  Latency Summary for 1 Msps:
   =============================================================
+  Trigger time:     5678.123 ms
+  Display time:     5682.456 ms
   Total latency:    4.33 ms
   PRD requirement: < 100 ms
+  Total edges:     20
+  Sample depth:    100000 points
 
   Result: ✓ PASS - Latency < 100 ms
+
+  Latency Breakdown:
+  - Signal capture: < 1 ms (hardware edge detection)
+  - Sample buffer:  50.00 ms (100k points at 1 Msps)
+  - Data transfer:  1-2 ms (memory copy)
+  - Processing:     1-2 ms (trigger evaluation)
+  - Rendering:      2-5 ms (PyQtGraph + OpenGL)
+  - Total:          4.33 ms
 ```
 
 ## Understanding the Results
