@@ -681,23 +681,216 @@ int main() {
 ### 开发指导原则
 
 **硬件配置**：
-1. 使用 `/dev/gpiochip4` 作为 RP1 GPIO 芯片
+1. 使用 `/dev/gpiochip4` 作为 RP1 GPIO 芯片（**不要使用 /dev/gpiochip0**）
 2. GPIO5 对应物理引脚 29，用于通道 1
 3. GPIO6 对应物理引脚 31，用于通道 2
 
 **软件架构**：
-1. **必须使用 PIGPIO DMA 模式**，不要使用 libgpiod 轮询
-2. 确保从源码安装完整版 PIGPIO（包含 pigpiod）
-3. 所有 GPIO 访问需要 root 权限或正确配置 udev 规则
+1. **使用 libgpiod C++ 边沿事件检测**（PIGPIO DMA 在 RPi5 上不兼容）
+2. 使用 `libgpiodcxx` C++ 绑定，双边沿事件检测（`EVENT_BOTH_EDGES`）
+3. 使用批量事件读取（`event_read_multiple()`）
+4. 所有 GPIO 访问需要 root 权限（使用 `sudo` 运行）
+5. 多线程架构（C++ 采样线程 + Python GUI 主线程）
 
 **性能优化**：
-1. 启动时自动启动 pigpiod 守护进程：`sudo systemctl enable pigpiod`
-2. 使用多线程架构（采样线程 + GUI 主线程）
+1. 使用批量事件读取减少系统调用
+2. 使用 CPU 亲和性绑定采样线程到特定核心
 3. 使用 PyQtGraph + OpenGL 加速绘图
+4. 事件队列缓存：内核级边沿检测，不依赖轮询
 
 **已知限制**：
-- Ubuntu 24.04 非实时系统，依赖 PIGPIO DMA 实现硬件级采样
-- 单个 pigpiod 实例支持多通道采样，避免重复启动
+- Ubuntu 24.04 是非实时操作系统，依赖内核级边沿事件
+- 1 Msps 采样率目标待高频率测试验证（目前仅验证 10 kHz）
+- PIGPIO 不支持 RPi5（硬件版本 e04171）
+
+**禁止项**：
+- ❌ 不要使用 Python 轮询（77% 边沿丢失）
+- ❌ 不要使用 PIGPIO（RPi5 不兼容）
+- ❌ 不要使用 /dev/gpiochip0（错误的芯片）
+
+### 开发经验教训（踩坑记录）
+
+#### 1. GPIO 硬件架构陷阱 ⚠️
+
+**错误做法**：
+```python
+GPIO_CHIP = "/dev/gpiochip0"  # ❌ 错误：这是 BCM 芯片
+GPIO_LINE = 5
+```
+
+**正确做法**：
+```python
+GPIO_CHIP = "/dev/gpiochip4"  # ✅ 正确：RP1 控制器
+GPIO_LINE = 5  # GPIO5 = 物理引脚 29
+```
+
+**如何发现的**：
+- 运行 `gpio_chip_test.py` 测试所有 /dev/gpiochip0-4
+- 发现物理引脚 29 的信号位于 chip4 的 line 5
+- RPi5 使用 RP1 GPIO 控制器，不同于传统 BCM 芯片
+
+**验证方法**：
+```bash
+python3 gpio_chip_test.py
+```
+
+#### 2. 权限问题陷阱 ⚠️
+
+**错误现象**：
+```
+[Errno 13] Permission denied accessing /dev/gpiochip4
+```
+
+**错误做法**：
+```bash
+python3 freq_measure_cpp  # ❌ 无权限
+```
+
+**正确做法**：
+```bash
+sudo ./freq_measure_cpp  # ✅ 使用 sudo
+```
+
+**权限配置（可选）**：
+```bash
+# 运行权限修复脚本
+./fix_gpio_perms.sh
+
+# 或手动配置 udev 规则
+sudo usermod -aG gpio $USER
+```
+
+**注意**：Ubuntu 24.04 中，即使配置了 udev 规则，某些操作仍需要 sudo
+
+#### 3. 采样方法选择陷阱 ⚠️
+
+| 方法 | 最大采样率 | 10 kHz 信号 | 误差率 | 推荐度 | 原因 |
+|------|-----------|------------|--------|--------|------|
+| Python 轮询 (libgpiod) | 368 ksps | 2.23 kHz | 77% | ❌ | Ubuntu 非实时系统，调度器影响大 |
+| Python 边沿检测 | 33 ksps | ~2.3 kHz | ~77% | ❌ | 仍然依赖 Python 解释器开销 |
+| **C++ 边沿事件** | **待测** | **10,001 Hz** | **<0.01%** | ✅ | 内核级边沿检测，硬件时间戳 |
+| PIGPIO DMA | N/A | N/A | N/A | ❌ | RPi5 不兼容 |
+
+**错误做法**：
+```python
+# ❌ 不要使用 Python 轮询
+while True:
+    value = line.get_value()
+    # 77% 的边沿丢失
+```
+
+**正确做法**：
+```cpp
+// ✅ 使用 C++ 边沿事件
+line_request config;
+config.request_type = line_request::EVENT_BOTH_EDGES;
+gpio_line.request(config);
+
+std::vector<line_event> events = gpio_line.event_read_multiple();
+// 纳秒级硬件时间戳，<0.01% 边沿丢失
+```
+
+**根本原因**：
+- Ubuntu 24.04 = 非实时操作系统
+- Python 轮询受调度器影响，无法保证高频信号完整性
+- C++ 边沿事件 = 内核级硬件中断驱动，不受 OS 调度影响
+
+#### 4. PIGPIO 安装陷阱 ⚠️
+
+**错误现象**：
+```bash
+sudo apt install python3-pigpio  # ✅ 成功
+python3 -c "import pigpio"        # ✅ 成功
+sudo systemctl start pigpiod      # ❌ 失败：Unit not found
+which pigpiod                     # ❌ 未找到
+```
+
+**根本原因**：
+- Ubuntu 24.04 的 `python3-pigpio` 包只包含 Python 绑定
+- 缺少 `pigpiod` 守护进程和 `pigs` CLI 工具
+
+**错误做法**：
+```bash
+# ❌ 从 Ubuntu 仓库安装
+sudo apt install python3-pigpio
+```
+
+**正确做法**（但 RPi5 仍然不兼容）：
+```bash
+# ✅ 从源码安装
+./install_pigpio_source.sh
+
+# ❌ 但运行时仍然失败
+gpioHardwareRevision: unknown rev code (e04171)
+Sorry, this system does not appear to be a raspberry pi.
+```
+
+**最终结论**：
+- PIGPIO V79 不支持 RPi5 硬件版本（e04171）
+- 原因：PIGPIO 基于 BCM283x SoC，RPi5 使用 RP1 控制器
+- **不要尝试修复 PIGPIO，改用 libgpiod C++**
+
+#### 5. Ubuntu 24.04 特性问题 ⚠️
+
+**系统信息**：
+```
+Raspberry Pi 5 Model B Rev 1.1
+OS: Ubuntu 24.04 LTS (Noble) - 不是 Raspberry Pi OS
+Kernel: Linux
+```
+
+**影响**：
+- 不是 Raspberry Pi OS，某些工具可能不可用
+- Python3 包管理：`python3-pip` 需要通过 `apt` 安装
+- 非 realtime 操作系统，需要硬件级采样方案
+
+**检查命令**：
+```bash
+python3 gpio_status.py
+```
+
+#### 6. 性能验证陷阱 ⚠️
+
+**错误假设**：
+```
+1 Msps 采样率一定可以达到
+```
+
+**实际验证**：
+- ✅ 10 kHz 信号：20,002 边沿/秒，100.01% 准确度
+- ⚠️ 50-100 kHz：待测试
+- ❓ 1 Msps：待验证（可能不可行）
+
+**差距分析**：
+- 当前验证：10 kHz（20k 边沿/秒）
+- PRD 目标：1 MHz（2M 边沿/秒）
+- **差距：100 倍！**
+
+**建议**：
+1. 先测试 50-100 kHz 确定稳定采样上限
+2. 如果边沿事件方法无法达到 1 Msps，考虑：
+   - 降低目标到 100 ksps
+   - 使用内存映射方法（复杂但高性能）
+   - 外部硬件采样方案（FPGA/ADC）
+
+#### 7. 配置文件陷阱 ⚠️
+
+**快捷键冲突**：
+```yaml
+trig_single: "S"           # ⚠️ 冲突
+trig_level_down: "S"        # ⚠️ 冲突
+```
+
+**正确做法**：
+```yaml
+trig_single: "S"
+trig_level_down: "D"       # ✅ 修复：改为 D
+```
+
+**GPIO 配置**：
+- 通道 3 和 4 的 GPIO 引脚未配置
+- 外部触发引脚未配置
+- 需要在 `config/osc_config.yaml` 中补充
 
 ### 验证脚本清单
 
