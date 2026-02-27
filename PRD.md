@@ -363,7 +363,7 @@ hotkeys:
   trig_normal: "N"
   trig_single: "S"
   trig_level_up: "W"
-  trig_level_down: "S"
+  trig_level_down: "D"
   fullscreen: "F"
   help: "H"
   about: "?"
@@ -877,14 +877,13 @@ python3 gpio_status.py
 
 **快捷键冲突**：
 ```yaml
-trig_single: "S"           # ⚠️ 冲突
-trig_level_down: "S"        # ⚠️ 冲突
-```
+# 之前的错误配置（已修复）
+trig_single: "S"           # ❌ 冲突
+trig_level_down: "S"       # ❌ 冲突
 
-**正确做法**：
-```yaml
+# 修复后的正确配置
 trig_single: "S"
-trig_level_down: "D"       # ✅ 修复：改为 D
+trig_level_down: "D"       # ✅ 已修复
 ```
 
 **GPIO 配置**：

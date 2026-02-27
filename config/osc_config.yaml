@@ -64,7 +64,7 @@ hotkeys:
   trig_normal: "N"
   trig_single: "S"
   trig_level_up: "W"
-  trig_level_down: "S"
+  trig_level_down: "D"
   fullscreen: "F"
   help: "H"
   about: "?"
