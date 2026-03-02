@@ -1,0 +1,58 @@
+.venv/
+tests/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.env
+.env
+venv/
+ENV/
+
+# Jupyter Notebooks
+*.ipynb_checkpoints
+
+# VS Code
+.vscode/
+
+# Logs
+logs/
+*.log
+
+# Build outputs
+*.out
+*.o
+*.so
+*.exe
+*.dll
+*.a
+*.obj
+
+# C/C++
+*.swp
+*.swo
+*.dSYM/
+
+# Test cache
+*.pytest_cache/
+
+# Misc
+.DS_Store
+Thumbs.db
+
+# Ignore config files with secrets
+*.secret.yaml
+*.secret.json
+
+# Ignore compiled binaries
+latency_test
+multi_channel_freq_test
+high_freq_stress_test
+
+# Ignore shell history
+*.sh_history
+
+# Ignore markdown preview cache
+*.md.cache
