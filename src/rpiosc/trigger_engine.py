@@ -46,6 +46,8 @@ class TriggerEngine:
 
         self._last_level_by_ch: dict[int, int] = {}
         self._last_edge_ns_by_ch: dict[int, dict[EdgeKind, int]] = {}
+        self._edges_seen_this_batch: dict[int, set[EdgeKind]] = {}
+        self._edge_just_seen_by_ch: dict[int, dict[EdgeKind, bool]] = {}
 
     @property
     def mode(self) -> TriggerMode:
@@ -78,17 +80,21 @@ class TriggerEngine:
         if self._last_trigger_ns is not None:
             if (now_ns - self._last_trigger_ns) < int(self._holdoff_s * 1e9):
                 self._ingest(events)
+                self._edges_seen_this_batch = {}
+                self._edge_just_seen_by_ch = {}
                 return None
 
-        self._ingest(events)
+        self._edges_seen_this_batch = {}
+        for ev in events:
+            self._edges_seen_this_batch.setdefault(ev.channel_id, set()).add(ev.edge)
 
-        if self._mode == TriggerMode.AUTO:
-            if self._evaluate(self._expr):
-                return self._fire("TRIGGER")
-            if (time.monotonic() - self._last_auto_fire_monotonic) >= self._auto_timeout_s:
-                self._last_auto_fire_monotonic = time.monotonic()
-                return self._fire("AUTO")
-            return None
+        self._edge_just_seen_by_ch = {}
+        for ev in events:
+            prev = self._last_edge_ns_by_ch.get(ev.channel_id, {}).get(ev.edge)
+            just = prev is None or ev.timestamp_ns != prev
+            self._edge_just_seen_by_ch.setdefault(ev.channel_id, {})[ev.edge] = just
+
+        self._ingest(events)
 
         if self._evaluate(self._expr):
             return self._fire("TRIGGER")
@@ -98,9 +104,44 @@ class TriggerEngine:
     def _fire(self, reason: str) -> TriggerDecision:
         ts = time.time_ns()
         self._last_trigger_ns = ts
+        if reason == "TRIGGER":
+            self._consume_edges_for_trigger(self._expr)
         if self._mode == TriggerMode.SINGLE and reason == "TRIGGER":
             self._single_done = True
         return TriggerDecision(triggered=True, reason=reason, timestamp_ns=ts)
+
+    def _consume_edges_for_trigger(self, expr: Expr) -> None:
+        if isinstance(expr, ChannelEdge):
+            kind = _edge_to_kind(expr.edge)
+            try:
+                del self._last_edge_ns_by_ch.get(expr.channel, {})[kind]
+            except Exception:
+                pass
+            return
+
+        if isinstance(expr, And):
+            self._consume_edges_for_trigger(expr.left)
+            self._consume_edges_for_trigger(expr.right)
+            return
+
+        if isinstance(expr, Or):
+            self._consume_edges_for_trigger(expr.left)
+            self._consume_edges_for_trigger(expr.right)
+            return
+
+        if isinstance(expr, Not):
+            self._consume_edges_for_trigger(expr.expr)
+            return
+
+        if isinstance(expr, WithinAfter):
+            self._consume_edges_for_trigger(expr.expr)
+            self._consume_edges_for_trigger(expr.anchor)
+            return
+
+        if isinstance(expr, WithinBefore):
+            self._consume_edges_for_trigger(expr.expr)
+            self._consume_edges_for_trigger(expr.anchor)
+            return
 
     def _ingest(self, events: list[EdgeEvent]) -> None:
         for ev in events:
@@ -124,12 +165,23 @@ class TriggerEngine:
             return not self._evaluate(expr.expr)
 
         if isinstance(expr, And):
+            # Special-case for pattern: (A) AND (B within ... after A)
+            if isinstance(expr.right, WithinAfter) and expr.right.anchor == expr.left:
+                if not self._evaluate(expr.left):
+                    return False
+                return self._evaluate(expr.right)
+
             return self._evaluate(expr.left) and self._evaluate(expr.right)
 
         if isinstance(expr, Or):
             return self._evaluate(expr.left) or self._evaluate(expr.right)
 
         if isinstance(expr, WithinAfter):
+            # window predicate is considered true only at the moment `expr` edge occurs
+            if isinstance(expr.expr, ChannelEdge):
+                kind = _edge_to_kind(expr.expr.edge)
+                if not bool(self._edge_just_seen_by_ch.get(expr.expr.channel, {}).get(kind)):
+                    return False
             return _within(
                 self._last_edge_ns_by_ch,
                 expr.expr,
@@ -169,6 +221,14 @@ def _expr_last_edge_ns(
             return max(d.values()) if d else None
         kind = EdgeKind.RISING if expr.edge == Edge.RISING else EdgeKind.FALLING
         return last_edges.get(expr.channel, {}).get(kind)
+
+    if isinstance(expr, WithinAfter):
+        # For nested timing expressions, use the timestamp of the inner expr.
+        return _expr_last_edge_ns(last_edges, expr.expr)
+
+    if isinstance(expr, WithinBefore):
+        return _expr_last_edge_ns(last_edges, expr.expr)
+
     return None
 
 

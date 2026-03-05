@@ -1,5 +1,7 @@
 .venv/
 tests/
+screenshots/
+*.png
 
 # Python
 __pycache__/

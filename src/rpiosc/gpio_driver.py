@@ -66,8 +66,10 @@ class LibgpiodEdgeSource(IGpioEdgeSource):
     def start(self) -> None:
         # gpiod v2 API: request_lines() returns a LineRequest used for wait/read.
         self._chip = gpiod.Chip(self._chip_path)
-        settings = gpiod.LineSettings(edge_detection=gpiod.line.Edge.BOTH)
-        config = {offset: settings for offset in self._lines_by_channel.values()}
+        config: dict[int, gpiod.LineSettings] = {}
+        for offset in self._lines_by_channel.values():
+            s = gpiod.LineSettings(edge_detection=gpiod.line.Edge.BOTH)
+            config[offset] = s
         self._request = self._chip.request_lines(config, consumer="rpiosc", event_buffer_size=4096)
         self._offset_by_channel = {ch: offset for ch, offset in self._lines_by_channel.items()}
 

@@ -43,7 +43,7 @@ sampling:
 
 # 界面配置
 display:
-  refresh_rate: 30  # fps
+  refresh_rate: 10  # fps
   grid_visible: true
   trigger_record_max: 100
   screenshot_path: "./screenshots/"
@@ -65,17 +65,13 @@ hotkeys:
   channel4: "4"
   x_scale_up: "Right"
   x_scale_down: "Left"
-  y_scale_up: "Up"
-  y_scale_down: "Down"
   x_position_up: "Shift+Right"
   x_position_down: "Shift+Left"
-  y_position_up: "Shift+Up"
-  y_position_down: "Shift+Down"
   trig_auto: "A"
   trig_normal: "N"
   trig_single: "S"
-  trig_level_up: "W"
-  trig_level_down: "D"
+  trig_position_left: "W"
+  trig_position_right: "D"
   fullscreen: "F"
   help: "H"
   about: "?"
