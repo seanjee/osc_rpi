@@ -30,5 +30,5 @@ trigger_conditions:
 
 # 当前激活的触发条件
 active_condition:
-  name: "CH1 Falling then CH2 Any Edge (1ms)"
-  expression: "CH2 Both Edges within 1ms after CH1 Falling"
+  name: "CH1 Any Edge"
+  expression: "CH1 Both Edges"

@@ -65,12 +65,21 @@ run app under ~/osc_rpi with command "PYTHONPATH=src .venv/bin/python -m rpiosc.
 
 yes I have seen screenshots png files but all of them are black with nothing. fix it. I want each png save the main screen(left up) of each trigging.
 
-==TODO
-触发条件改为：
-第1通道下降沿后的1ms之内通道2出现了边沿跳变（上升或下降），则触发
-
 当前显示分辨率降低了，导致左上窗口显示不全。将左下窗口所有按钮的快捷键说明放到按钮文字同一行，减小按钮高度。将左下窗口中fs,mode,X,TrigPos,的显示放到同一行节省垂直空间。Holdoff,CPU,MEM的显示放到同一行节省垂直空间。
 
+默认触发条件改为：
+第1通道下降沿后的1ms之内通道2出现了边沿跳变（上升或下降），则触发
+
+默认触发条件改为：
+第1通道出现了边沿跳变（上升或下降），则触发
+==TODO
+
+当前显示仅显示了第二通道（绿色），第一通道未显示。
+并没有修复，并且连第二通道的实时波形也没有显示出来。
+
+当前窗口是根据PRD.md编写的数字示波器app，用于抓取特定条件的信号并保存附近的实时波形。当前实时显示画面（左上窗口）显示不正确，在auto模式下，各个通道的实时信号都没有显示出来。分析问题并修复。
+
+告诉我当前GPIO上的采样方法，是仅采集边沿信号还是以一定采样频率持续采样的？
 
 
 对触发操作的代码处理上，要设置一个触发开关标志，用处是比如在Single模式下第一次触发后，触发开关就要关闭，再次按下Single按键或者设置其他触发模式时再打开此开关，由此来控制触发的使能。

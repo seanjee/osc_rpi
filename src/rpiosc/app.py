@@ -21,7 +21,7 @@ class OscMainWindow(QtWidgets.QMainWindow):
         # Left-top: waveform
         self.plot = pg.PlotWidget()
         self.plot.showGrid(x=True, y=True)
-        self.plot.setYRange(0.0, 1.5)
+        self.plot.setYRange(-0.1, 1.3)
         self.plot.setXRange(0.0, 0.005, padding=0.0)
         x_axis = self.plot.getAxis("bottom")
         y_axis = self.plot.getAxis("left")
@@ -160,7 +160,7 @@ class OscMainWindow(QtWidgets.QMainWindow):
         # Right-top: snapshot
         self.snapshot_plot = pg.PlotWidget()
         self.snapshot_plot.showGrid(x=True, y=True)
-        self.snapshot_plot.setYRange(0.0, 1.5)
+        self.snapshot_plot.setYRange(-0.1, 1.3)
         self.snapshot_plot.setXRange(0.0, 0.005, padding=0.0)
         self.snapshot_plot.setBackground("#202020")
         layout.addWidget(self.snapshot_plot, 0, 1)
@@ -217,7 +217,7 @@ class OscMainWindow(QtWidgets.QMainWindow):
                 off = y_offsets.get(ch, 0.0)
                 curve.setData(xs, [y + off for y in ys])
             else:
-                curve.clear()
+                curve.setData([0.0, 0.0], [0.0, 0.0])
 
     @QtCore.Slot(object, str)
     def on_snapshot_traces(self, traces: dict, ts: str):
@@ -233,7 +233,7 @@ class OscMainWindow(QtWidgets.QMainWindow):
                 off = y_offsets.get(ch, 0.0)
                 curve.setData(xs, [y + off for y in ys])
             else:
-                curve.clear()
+                curve.setData([0.0, 0.0], [0.0, 0.0])
         self.snapshot_plot.setToolTip(ts)
 
     @QtCore.Slot(float, float, object)

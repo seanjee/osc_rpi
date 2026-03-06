@@ -58,7 +58,7 @@ class Controller(QtCore.QObject):
 
         self.trigger_position_div = 2.5
         self.trigger_marker_channel = self.osc_cfg.trigger.default_channel
-        self.last_trigger_monotonic: float | None = None
+        self.last_trigger_ns: int | None = None
         self.holdoff_s = self.osc_cfg.trigger.default_holdoff_s
 
         self.engine = TriggerEngine(
@@ -77,11 +77,11 @@ class Controller(QtCore.QObject):
         self._trigger_lines: list[TriggerLogLine] = []
         self._trigger_lines_max = self.osc_cfg.display.trigger_record_max
 
-        self._edge_history: dict[int, list[tuple[float, int]]] = {1: [], 2: [], 3: [], 4: []}
-        self._history_window_s = 5.0
+        self._edge_history: dict[int, list[tuple[int, int]]] = {1: [], 2: [], 3: [], 4: []}  # (timestamp_ns, level)
+        self._history_window_ns = 5_000_000_000  # 5.0 seconds in nanoseconds
 
         self._frozen_traces: dict[int, tuple[list[float], list[float]]] | None = None
-        self._freeze_until_monotonic: float | None = None
+        self._freeze_until_ns: int | None = None
 
         self._io_queue: queue.Queue[tuple[str, QtGui.QImage, str]] = queue.Queue()
 
@@ -263,32 +263,27 @@ class Controller(QtCore.QObject):
 
     def _sampling_loop(self):
         refresh_period = 1.0 / max(1, self.osc_cfg.display.refresh_rate)
-        last_refresh = time.monotonic()
+        last_refresh_ns = time.time_ns()
 
         while not self._stop.is_set():
             events = self._edge_source.read_events(timeout_s=0.005)
 
-            now = time.monotonic()
-            base_mono = time.monotonic()
-            base_ev_ns = events[0].timestamp_ns if events else None
+            now_ns = time.time_ns()
 
             for ev in events:
                 if not self.enabled_channels.get(ev.channel_id, True):
                     continue
                 level = 1 if ev.edge.name == "RISING" else 0
-                t_mono = now
-                if base_ev_ns is not None:
-                    t_mono = base_mono + (ev.timestamp_ns - base_ev_ns) / 1e9
-                self._edge_history.setdefault(ev.channel_id, []).append((t_mono, level))
+                self._edge_history.setdefault(ev.channel_id, []).append((ev.timestamp_ns, level))
 
             for ch, pts in self._edge_history.items():
-                cutoff = now - self._history_window_s
-                while pts and pts[0][0] < cutoff:
+                cutoff_ns = now_ns - self._history_window_ns
+                while pts and pts[0][0] < cutoff_ns:
                     pts.pop(0)
 
             decision = self.engine.process(events)
             if decision is not None:
-                self.last_trigger_monotonic = now
+                self.last_trigger_ns = time.time_ns()
 
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                 line = TriggerLogLine(timestamp=ts, text=f"{ts}  {decision.reason}")
@@ -300,7 +295,7 @@ class Controller(QtCore.QObject):
                     TriggerRecord(timestamp=ts, condition="active", status=decision.reason)
                 )
 
-                self._frozen_traces = self._build_traces(time.monotonic())
+                self._frozen_traces = self._build_traces(time.time_ns())
                 self.state.snapshot_traces_updated.emit(self._frozen_traces, ts)
 
                 QtCore.QMetaObject.invokeMethod(
@@ -317,45 +312,46 @@ class Controller(QtCore.QObject):
                     QtCore.Q_ARG(str, ts),
                 )
                 if self.engine.mode == TriggerMode.AUTO:
-                    self._freeze_until_monotonic = time.monotonic() + 2.0
+                    self._freeze_until_ns = time.time_ns() + int(2.0 * 1e9)
                 else:
-                    self._freeze_until_monotonic = None
+                    self._freeze_until_ns = None
 
-            if (time.monotonic() - last_refresh) >= refresh_period:
-                now_refresh = time.monotonic()
+            now_ns = time.time_ns()
+            if (now_ns - last_refresh_ns) >= int(refresh_period * 1e9):
+                now_refresh_ns = now_ns
                 if self._frozen_traces is not None:
-                    if self.engine.mode == TriggerMode.AUTO and self._freeze_until_monotonic is not None:
-                        if now_refresh >= self._freeze_until_monotonic:
+                    if self.engine.mode == TriggerMode.AUTO and self._freeze_until_ns is not None:
+                        if now_refresh_ns >= self._freeze_until_ns:
                             self._frozen_traces = None
-                            self._freeze_until_monotonic = None
-                            self.last_trigger_monotonic = None
+                            self._freeze_until_ns = None
+                            self.last_trigger_ns = None
                     if self._frozen_traces is not None:
                         self.state.waveform_updated.emit(self._frozen_traces)
-                        last_refresh = now_refresh
+                        last_refresh_ns = now_refresh_ns
                         continue
 
                 window_s = self.viewport.seconds_per_div * 5.0
-                cutoff = now_refresh - window_s - 0.1
+                cutoff_ns = now_refresh_ns - int(window_s * 1e9) - 100_000_000  # window_s + 0.1s
                 for ch, pts in self._edge_history.items():
-                    while pts and pts[0][0] < cutoff:
+                    while pts and pts[0][0] < cutoff_ns:
                         pts.pop(0)
 
-                traces = self._build_traces(now_refresh)
+                traces = self._build_traces(now_refresh_ns)
                 self.state.waveform_updated.emit(traces)
 
-                last_refresh = now_refresh
+                last_refresh_ns = now_refresh_ns
 
-    def _build_traces(self, now: float):
+    def _build_traces(self, now_ns: int):
         traces: dict[int, tuple[list[float], list[float]]] = {}
-        window_s = self.viewport.seconds_per_div * 5.0
+        window_ns = int(self.viewport.seconds_per_div * 5.0 * 1e9)
 
         if self.engine.mode == TriggerMode.AUTO:
-            t0 = now - (self.trigger_position_div / 5.0) * window_s
+            t0_ns = now_ns - int((self.trigger_position_div / 5.0) * window_ns)
         else:
-            if self.last_trigger_monotonic is not None:
-                t0 = self.last_trigger_monotonic - (self.trigger_position_div / 5.0) * window_s
+            if self.last_trigger_ns is not None:
+                t0_ns = self.last_trigger_ns - int((self.trigger_position_div / 5.0) * window_ns)
             else:
-                t0 = now - window_s
+                t0_ns = now_ns - window_ns
         for ch, pts in self._edge_history.items():
             if not self.enabled_channels.get(ch, True):
                 continue
@@ -363,15 +359,15 @@ class Controller(QtCore.QObject):
                 continue
             xs: list[float] = []
             ys: list[float] = []
-            for t, level in pts:
-                if t < t0:
+            for t_ns, level in pts:
+                if t_ns < t0_ns:
                     continue
-                x = t - t0
-                if x < 0.0:
+                x_s = (t_ns - t0_ns) / 1e9
+                if x_s < 0.0:
                     continue
-                if x > window_s:
+                if x_s > self.viewport.seconds_per_div * 5.0:
                     continue
-                xs.append(x)
+                xs.append(x_s)
                 ys.append(level)
             if xs:
                 traces[ch] = (xs, ys)
