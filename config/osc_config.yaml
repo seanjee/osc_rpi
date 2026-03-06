@@ -51,7 +51,7 @@ display:
 
 # 触发默认配置
 trigger:
-  default_mode: "Normal"  # Auto, Normal, Single
+  default_mode: "Auto"  # Auto, Normal, Single
   default_channel: 1
   default_level: 1.65  # V
   default_edge: "Rising"  # Rising, Falling, Both

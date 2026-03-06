@@ -407,7 +407,7 @@ def main():
         lambda: win.btn_trig_pos_right.click(),
     )
 
-    win.show()
+    win.showMaximized()
     ctrl.start()
 
     def _cleanup():

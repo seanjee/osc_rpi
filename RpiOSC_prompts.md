@@ -74,6 +74,8 @@ yes I have seen screenshots png files but all of them are black with nothing. fi
 第1通道出现了边沿跳变（上升或下降），则触发
 ==TODO
 
+
+
 当前显示仅显示了第二通道（绿色），第一通道未显示。
 并没有修复，并且连第二通道的实时波形也没有显示出来。
 
