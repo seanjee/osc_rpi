@@ -77,7 +77,12 @@ class Controller(QtCore.QObject):
         self._trigger_lines: list[TriggerLogLine] = []
         self._trigger_lines_max = self.osc_cfg.display.trigger_record_max
 
-        self._edge_history: dict[int, list[tuple[int, int]]] = {1: [], 2: [], 3: [], 4: []}  # (timestamp_ns, level)
+        # Per-channel history points in monotonic nanoseconds.
+        # Points come from two sources:
+        # - edge events (timestamp is the kernel event timestamp; level is the level AFTER the edge)
+        # - sampled levels (timestamp is when we sampled; level is the current level)
+        # We keep the source flag so rendering can draw vertical transitions only for edge points.
+        self._edge_history: dict[int, list[tuple[int, int, bool]]] = {1: [], 2: [], 3: [], 4: []}  # (timestamp_ns, level, is_edge)
         self._history_window_ns = 5_000_000_000  # 5.0 seconds in nanoseconds
 
         self._frozen_traces: dict[int, tuple[list[float], list[float]]] | None = None
@@ -129,6 +134,13 @@ class Controller(QtCore.QObject):
 
             if w is None:
                 return
+
+            # Ensure the UI has had a chance to repaint with the latest snapshot.
+            try:
+                w.repaint()
+                QtWidgets.QApplication.processEvents()
+            except Exception:
+                pass
 
             screen = w.screen() or QtGui.QGuiApplication.primaryScreen()
             if screen is None:
@@ -276,7 +288,7 @@ class Controller(QtCore.QObject):
                 if not self.enabled_channels.get(ev.channel_id, True):
                     continue
                 level = 1 if ev.edge.name == "RISING" else 0
-                self._edge_history.setdefault(ev.channel_id, []).append((ev.timestamp_ns, level))
+                self._edge_history.setdefault(ev.channel_id, []).append((int(ev.timestamp_ns), int(level), True))
 
             for ch, pts in self._edge_history.items():
                 cutoff_ns = now_ns - self._history_window_ns
@@ -287,17 +299,31 @@ class Controller(QtCore.QObject):
             if decision is not None:
                 self.last_trigger_ns = decision.timestamp_ns
 
+                # If we can infer a trigger channel, use it for marker coloring.
+                if decision.channel_id is not None:
+                    self.trigger_marker_channel = int(decision.channel_id)
+
+                window_s = self.viewport.seconds_per_div * 5.0
+                x = (self.trigger_position_div / 5.0) * window_s
+                self.state.trigger_marker_updated.emit(x, int(self.trigger_marker_channel))
+
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                line = TriggerLogLine(timestamp=ts, text=f"{ts}  {decision.reason}")
+                detail = (decision.detail or "").strip()
+                text = f"{ts}  {decision.reason}" + (f"  {detail}" if detail else "")
+                line = TriggerLogLine(timestamp=ts, text=text)
                 self._trigger_lines.insert(0, line)
                 self._trigger_lines = self._trigger_lines[: self._trigger_lines_max]
                 self.state.triggerlog_updated.emit(self._trigger_lines)
 
                 self.log_writer.append(
-                    TriggerRecord(timestamp=ts, condition="active", status=decision.reason)
+                    TriggerRecord(
+                        timestamp=ts,
+                        condition=self.trigger_condition_text,
+                        status=(decision.reason + (f" {detail}" if detail else "")),
+                    )
                 )
 
-                self._frozen_traces = self._build_traces(decision.timestamp_ns)
+                self._frozen_traces = self._build_traces(decision.timestamp_ns, anchor="trigger")
                 self.state.snapshot_traces_updated.emit(self._frozen_traces, ts)
 
                 QtCore.QMetaObject.invokeMethod(
@@ -331,8 +357,8 @@ class Controller(QtCore.QObject):
                     # If no recent events or last event is too old, add current level
                     if not pts or (now_ns - pts[-1][0] > int(refresh_period * 1e9)):
                         # Only add if different from last level to avoid duplicates
-                        if not pts or pts[-1][1] != level:
-                            self._edge_history.setdefault(ch, []).append((now_ns, level))
+                        if not pts or pts[-1][1] != int(level):
+                            self._edge_history.setdefault(ch, []).append((now_ns, int(level), False))
 
                 if self._frozen_traces is not None:
                     if self.engine.mode == TriggerMode.AUTO and self._freeze_until_ns is not None:
@@ -351,23 +377,23 @@ class Controller(QtCore.QObject):
                     while pts and pts[0][0] < cutoff_ns:
                         pts.pop(0)
 
-                traces = self._build_traces(now_refresh_ns)
+                # Live view: place the newest sample at the right edge of the viewport.
+                traces = self._build_traces(now_refresh_ns, anchor="right")
                 self.state.waveform_updated.emit(traces)
 
                 last_refresh_ns = now_refresh_ns
 
-    def _build_traces(self, now_ns: int):
+    def _build_traces(self, now_ns: int, *, anchor: str = "right"):
         traces: dict[int, tuple[list[float], list[float]]] = {}
         window_ns = int(self.viewport.seconds_per_div * 5.0 * 1e9)
         window_s = self.viewport.seconds_per_div * 5.0
 
-        if self.engine.mode == TriggerMode.AUTO:
+        if anchor == "trigger":
+            # Align the given timestamp (typically the trigger) to the trigger marker position.
             t0_ns = now_ns - int((self.trigger_position_div / 5.0) * window_ns)
         else:
-            if self.last_trigger_ns is not None:
-                t0_ns = self.last_trigger_ns - int((self.trigger_position_div / 5.0) * window_ns)
-            else:
-                t0_ns = now_ns - window_ns
+            # Default rolling behavior: newest point at right edge.
+            t0_ns = now_ns - window_ns
 
         for ch, pts in self._edge_history.items():
             if not self.enabled_channels.get(ch, True):
@@ -379,30 +405,32 @@ class Controller(QtCore.QObject):
             ys: list[float] = []
 
             # Determine the level at the left edge (t0_ns).
-            # Stored points represent the level AFTER the edge.
             prev_level: int | None = None
-            first_in_window: tuple[int, int] | None = None
-            for t_ns, level in pts:
+            first_in_window: tuple[int, int, bool] | None = None
+            for t_ns, level, is_edge in pts:
                 if t_ns < t0_ns:
-                    prev_level = level
+                    prev_level = int(level)
                     continue
-                first_in_window = (t_ns, level)
+                first_in_window = (t_ns, int(level), bool(is_edge))
                 break
 
             if prev_level is None and first_in_window is not None:
-                # If the first event we see is an edge inside the window, the
-                # level just before that edge must be the opposite.
-                prev_level = 1 - int(first_in_window[1])
+                # If the first point is an edge, infer the level before it.
+                # If it's a sampled level, use it as the baseline.
+                if first_in_window[2]:
+                    prev_level = 1 - int(first_in_window[1])
+                else:
+                    prev_level = int(first_in_window[1])
 
             if prev_level is not None:
                 xs.append(0.0)
                 ys.append(int(prev_level))
-                last_level = int(prev_level)
+                last_level: int | None = int(prev_level)
             else:
                 last_level = None
 
-            # Add step points within the window.
-            for t_ns, level_after in pts:
+            # Add points within the window.
+            for t_ns, level, is_edge in pts:
                 if t_ns < t0_ns:
                     continue
                 x_s = (t_ns - t0_ns) / 1e9
@@ -410,23 +438,28 @@ class Controller(QtCore.QObject):
                     continue
                 if x_s > window_s:
                     continue
-                level_after = int(level_after)
 
-                if last_level is None:
-                    # No baseline yet; start at this level.
-                    xs.append(x_s)
-                    ys.append(level_after)
-                elif level_after != last_level:
-                    # Vertical transition at this timestamp.
-                    xs.append(x_s)
-                    ys.append(last_level)
-                    xs.append(x_s)
-                    ys.append(level_after)
+                level = int(level)
+                is_edge = bool(is_edge)
+
+                if is_edge:
+                    # Edge point: draw a vertical transition.
+                    if last_level is None:
+                        last_level = 1 - level
+                    if level != last_level:
+                        xs.append(x_s)
+                        ys.append(int(last_level))
+                        xs.append(x_s)
+                        ys.append(int(level))
+                    else:
+                        xs.append(x_s)
+                        ys.append(int(level))
+                    last_level = level
                 else:
+                    # Sampled level: draw as a regular point.
                     xs.append(x_s)
-                    ys.append(level_after)
-
-                last_level = level_after
+                    ys.append(int(level))
+                    last_level = level
 
             # Extend to the right edge so the trace fills the viewport.
             if xs and last_level is not None:

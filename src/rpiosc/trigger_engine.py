@@ -24,6 +24,9 @@ class TriggerDecision:
     triggered: bool
     reason: str
     timestamp_ns: int
+    channel_id: int | None = None
+    edge: EdgeKind | None = None
+    detail: str = ""
 
 
 class TriggerEngine:
@@ -104,12 +107,44 @@ class TriggerEngine:
         if trigger_ts is None:
             trigger_ts = time.time_ns()
 
+        ch, edge = self._get_trigger_source(trigger_ts)
+        detail = ""
+        if ch is not None and edge is not None:
+            detail = f"CH{ch} {edge.value}"
+
         self._last_trigger_ns = trigger_ts
         if reason == "TRIGGER":
             self._consume_edges_for_trigger(self._expr)
         if self._mode == TriggerMode.SINGLE and reason == "TRIGGER":
             self._single_done = True
-        return TriggerDecision(triggered=True, reason=reason, timestamp_ns=trigger_ts)
+        return TriggerDecision(
+            triggered=True,
+            reason=reason,
+            timestamp_ns=trigger_ts,
+            channel_id=ch,
+            edge=edge,
+            detail=detail,
+        )
+
+    def _get_trigger_source(self, trigger_ts: int) -> tuple[int | None, EdgeKind | None]:
+        """Best-effort extraction of the channel/edge that corresponds to trigger_ts."""
+        # Only reliable for simple ChannelEdge expressions.
+        if isinstance(self._expr, ChannelEdge):
+            ch = int(self._expr.channel)
+            d = self._last_edge_ns_by_ch.get(ch, {})
+            if not d:
+                return ch, None
+            if self._expr.edge == Edge.BOTH:
+                # Choose the edge kind whose timestamp matches the selected trigger timestamp.
+                for kind, ts in d.items():
+                    if int(ts) == int(trigger_ts):
+                        return ch, kind
+                # Fallback: pick the most recent.
+                kind = max(d.items(), key=lambda kv: int(kv[1]))[0]
+                return ch, kind
+            kind = _edge_to_kind(self._expr.edge)
+            return ch, kind
+        return None, None
 
     def _get_trigger_timestamp(self) -> int | None:
         """Get the timestamp of the edge event that caused the trigger."""
