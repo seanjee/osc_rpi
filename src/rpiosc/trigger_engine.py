@@ -47,7 +47,6 @@ class TriggerEngine:
         self._last_level_by_ch: dict[int, int] = {}
         self._last_edge_ns_by_ch: dict[int, dict[EdgeKind, int]] = {}
         self._edges_seen_this_batch: dict[int, set[EdgeKind]] = {}
-        self._edge_just_seen_by_ch: dict[int, dict[EdgeKind, bool]] = {}
 
     @property
     def mode(self) -> TriggerMode:
@@ -80,35 +79,49 @@ class TriggerEngine:
         if self._last_trigger_ns is not None:
             if (now_ns - self._last_trigger_ns) < int(self._holdoff_s * 1e9):
                 self._ingest(events)
-                self._edges_seen_this_batch = {}
-                self._edge_just_seen_by_ch = {}
                 return None
 
+        # Track edges seen in this batch for BOTH edge detection
         self._edges_seen_this_batch = {}
         for ev in events:
             self._edges_seen_this_batch.setdefault(ev.channel_id, set()).add(ev.edge)
 
-        self._edge_just_seen_by_ch = {}
-        for ev in events:
-            prev = self._last_edge_ns_by_ch.get(ev.channel_id, {}).get(ev.edge)
-            just = prev is None or ev.timestamp_ns != prev
-            self._edge_just_seen_by_ch.setdefault(ev.channel_id, {})[ev.edge] = just
-
         self._ingest(events)
 
-        if self._evaluate(self._expr):
+        if self._evaluate(self._expr, new_edges=self._edges_seen_this_batch):
             return self._fire("TRIGGER")
 
         return None
 
     def _fire(self, reason: str) -> TriggerDecision:
-        ts = time.time_ns()
-        self._last_trigger_ns = ts
+        # Use the edge event timestamp from _get_trigger_timestamp
+        trigger_ts = self._get_trigger_timestamp()
+        if trigger_ts is None:
+            trigger_ts = time.time_ns()
+
+        self._last_trigger_ns = trigger_ts
         if reason == "TRIGGER":
             self._consume_edges_for_trigger(self._expr)
         if self._mode == TriggerMode.SINGLE and reason == "TRIGGER":
             self._single_done = True
-        return TriggerDecision(triggered=True, reason=reason, timestamp_ns=ts)
+        return TriggerDecision(triggered=True, reason=reason, timestamp_ns=trigger_ts)
+
+    def _get_trigger_timestamp(self) -> int | None:
+        """Get the timestamp of the edge event that caused the trigger."""
+        # Check which edge(s) in the current batch caused the trigger
+        if isinstance(self._expr, ChannelEdge):
+            if self._expr.edge == Edge.BOTH:
+                # For BOTH edges, use the most recent edge timestamp from the batch
+                ch_edges = self._last_edge_ns_by_ch.get(self._expr.channel, {})
+                if not ch_edges:
+                    return None
+                # Return the most recent edge timestamp
+                return max(ch_edges.values())
+            else:
+                # For single edge type, return that edge's timestamp
+                kind = _edge_to_kind(self._expr.edge)
+                return self._last_edge_ns_by_ch.get(self._expr.channel, {}).get(kind)
+        return None
 
     def _consume_edges_for_trigger(self, expr: Expr) -> None:
         if isinstance(expr, ChannelEdge):
@@ -151,37 +164,49 @@ class TriggerEngine:
             elif ev.edge == EdgeKind.FALLING:
                 self._last_level_by_ch[ev.channel_id] = 0
 
-    def _evaluate(self, expr: Expr) -> bool:
+    def _evaluate(self, expr: Expr, new_edges: dict[int, set[EdgeKind]] | None = None) -> bool:
         if isinstance(expr, ChannelEdge):
-            # true if we've seen that edge at least once
-            kind = _edge_to_kind(expr.edge)
-            return kind in self._last_edge_ns_by_ch.get(expr.channel, {})
+            # true if edge was just seen in this batch
+            if new_edges is None:
+                # Fallback for backward compatibility
+                if expr.edge == Edge.BOTH:
+                    ch_edges = self._last_edge_ns_by_ch.get(expr.channel, {})
+                    return EdgeKind.RISING in ch_edges or EdgeKind.FALLING in ch_edges
+                kind = _edge_to_kind(expr.edge)
+                return kind in self._last_edge_ns_by_ch.get(expr.channel, {})
+            else:
+                # Check if this specific edge was just seen
+                edges_this_batch = new_edges.get(expr.channel, set())
+                if expr.edge == Edge.BOTH:
+                    return EdgeKind.RISING in edges_this_batch or EdgeKind.FALLING in edges_this_batch
+                kind = _edge_to_kind(expr.edge)
+                return kind in edges_this_batch
 
         if isinstance(expr, ChannelLevel):
             want = 1 if expr.level == Level.HIGH else 0
             return self._last_level_by_ch.get(expr.channel) == want
 
         if isinstance(expr, Not):
-            return not self._evaluate(expr.expr)
+            return not self._evaluate(expr.expr, new_edges)
 
         if isinstance(expr, And):
-            # Special-case for pattern: (A) AND (B within ... after A)
-            if isinstance(expr.right, WithinAfter) and expr.right.anchor == expr.left:
-                if not self._evaluate(expr.left):
-                    return False
-                return self._evaluate(expr.right)
-
-            return self._evaluate(expr.left) and self._evaluate(expr.right)
+            return self._evaluate(expr.left, new_edges) and self._evaluate(expr.right, new_edges)
 
         if isinstance(expr, Or):
-            return self._evaluate(expr.left) or self._evaluate(expr.right)
+            return self._evaluate(expr.left, new_edges) or self._evaluate(expr.right, new_edges)
 
         if isinstance(expr, WithinAfter):
             # window predicate is considered true only at the moment `expr` edge occurs
             if isinstance(expr.expr, ChannelEdge):
-                kind = _edge_to_kind(expr.expr.edge)
-                if not bool(self._edge_just_seen_by_ch.get(expr.expr.channel, {}).get(kind)):
-                    return False
+                edges_this_batch = new_edges.get(expr.expr.channel, set()) if new_edges else set()
+                if expr.expr.edge == Edge.BOTH:
+                    # For BOTH, check if either edge was just seen
+                    if not (EdgeKind.RISING in edges_this_batch or EdgeKind.FALLING in edges_this_batch):
+                        return False
+                else:
+                    kind = _edge_to_kind(expr.expr.edge)
+                    if kind not in edges_this_batch:
+                        return False
             return _within(
                 self._last_edge_ns_by_ch,
                 expr.expr,

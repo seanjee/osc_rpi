@@ -41,10 +41,10 @@ class OscMainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.plot, 0, 0)
 
         self.curves = {
-            1: self.plot.plot(pen=pg.mkPen("y", width=1), stepMode="right"),
-            2: self.plot.plot(pen=pg.mkPen("g", width=1), stepMode="right"),
-            3: self.plot.plot(pen=pg.mkPen("m", width=1), stepMode="right"),
-            4: self.plot.plot(pen=pg.mkPen("b", width=1), stepMode="right"),
+            1: self.plot.plot(pen=pg.mkPen("y", width=2), connect="finite"),
+            2: self.plot.plot(pen=pg.mkPen("g", width=2), connect="finite"),
+            3: self.plot.plot(pen=pg.mkPen("m", width=2), connect="finite"),
+            4: self.plot.plot(pen=pg.mkPen("b", width=2), connect="finite"),
         }
 
         self.ch_colors = {
@@ -166,10 +166,10 @@ class OscMainWindow(QtWidgets.QMainWindow):
         layout.addWidget(self.snapshot_plot, 0, 1)
 
         self.snapshot_curves = {
-            1: self.snapshot_plot.plot(pen=pg.mkPen("y", width=1), stepMode="right"),
-            2: self.snapshot_plot.plot(pen=pg.mkPen("g", width=1), stepMode="right"),
-            3: self.snapshot_plot.plot(pen=pg.mkPen("m", width=1), stepMode="right"),
-            4: self.snapshot_plot.plot(pen=pg.mkPen("b", width=1), stepMode="right"),
+            1: self.snapshot_plot.plot(pen=pg.mkPen("y", width=2), connect="finite"),
+            2: self.snapshot_plot.plot(pen=pg.mkPen("g", width=2), connect="finite"),
+            3: self.snapshot_plot.plot(pen=pg.mkPen("m", width=2), connect="finite"),
+            4: self.snapshot_plot.plot(pen=pg.mkPen("b", width=2), connect="finite"),
         }
 
         self.snapshot_trigger_marker = pg.InfiniteLine(

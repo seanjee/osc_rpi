@@ -283,7 +283,7 @@ class Controller(QtCore.QObject):
 
             decision = self.engine.process(events)
             if decision is not None:
-                self.last_trigger_ns = time.time_ns()
+                self.last_trigger_ns = decision.timestamp_ns
 
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                 line = TriggerLogLine(timestamp=ts, text=f"{ts}  {decision.reason}")
@@ -295,7 +295,7 @@ class Controller(QtCore.QObject):
                     TriggerRecord(timestamp=ts, condition="active", status=decision.reason)
                 )
 
-                self._frozen_traces = self._build_traces(time.time_ns())
+                self._frozen_traces = self._build_traces(decision.timestamp_ns)
                 self.state.snapshot_traces_updated.emit(self._frozen_traces, ts)
 
                 QtCore.QMetaObject.invokeMethod(
@@ -312,13 +312,26 @@ class Controller(QtCore.QObject):
                     QtCore.Q_ARG(str, ts),
                 )
                 if self.engine.mode == TriggerMode.AUTO:
-                    self._freeze_until_ns = time.time_ns() + int(2.0 * 1e9)
+                    self._freeze_until_ns = decision.timestamp_ns + int(2.0 * 1e9)
                 else:
                     self._freeze_until_ns = None
 
             now_ns = time.time_ns()
             if (now_ns - last_refresh_ns) >= int(refresh_period * 1e9):
                 now_refresh_ns = now_ns
+
+                # Read current GPIO levels and add to history for channels without recent edges
+                current_levels = self._edge_source.read_current_levels()
+                for ch, level in current_levels.items():
+                    if not self.enabled_channels.get(ch, True):
+                        continue
+                    pts = self._edge_history.get(ch, [])
+                    # If no recent events or last event is too old, add current level
+                    if not pts or (now_ns - pts[-1][0] > int(refresh_period * 1e9)):
+                        # Only add if different from last level to avoid duplicates
+                        if not pts or pts[-1][1] != level:
+                            self._edge_history.setdefault(ch, []).append((now_ns, level))
+
                 if self._frozen_traces is not None:
                     if self.engine.mode == TriggerMode.AUTO and self._freeze_until_ns is not None:
                         if now_refresh_ns >= self._freeze_until_ns:
@@ -344,6 +357,7 @@ class Controller(QtCore.QObject):
     def _build_traces(self, now_ns: int):
         traces: dict[int, tuple[list[float], list[float]]] = {}
         window_ns = int(self.viewport.seconds_per_div * 5.0 * 1e9)
+        window_s = self.viewport.seconds_per_div * 5.0
 
         if self.engine.mode == TriggerMode.AUTO:
             t0_ns = now_ns - int((self.trigger_position_div / 5.0) * window_ns)
@@ -352,25 +366,47 @@ class Controller(QtCore.QObject):
                 t0_ns = self.last_trigger_ns - int((self.trigger_position_div / 5.0) * window_ns)
             else:
                 t0_ns = now_ns - window_ns
+
         for ch, pts in self._edge_history.items():
             if not self.enabled_channels.get(ch, True):
                 continue
             if not pts:
                 continue
+
             xs: list[float] = []
             ys: list[float] = []
+
+            # Find the level just before t0_ns
+            prev_level = None
+            for t_ns, level in pts:
+                if t_ns < t0_ns:
+                    prev_level = level
+
+            # If we have a previous level, add a point at t0_ns with that level
+            if prev_level is not None:
+                xs.append(0.0)
+                ys.append(prev_level)
+
+            # Add points within the window
             for t_ns, level in pts:
                 if t_ns < t0_ns:
                     continue
                 x_s = (t_ns - t0_ns) / 1e9
                 if x_s < 0.0:
                     continue
-                if x_s > self.viewport.seconds_per_div * 5.0:
+                if x_s > window_s:
                     continue
                 xs.append(x_s)
                 ys.append(level)
+
+            # If we have points, add a point at the end of the window with the last level
+            if xs:
+                xs.append(window_s)
+                ys.append(ys[-1])
+
             if xs:
                 traces[ch] = (xs, ys)
+
         return traces
 
     def _render_snapshot(self) -> QtGui.QImage:

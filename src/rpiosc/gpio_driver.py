@@ -30,6 +30,8 @@ class IGpioEdgeSource(Protocol):
 
     def read_events(self, timeout_s: float) -> list[EdgeEvent]: ...
 
+    def read_current_levels(self) -> dict[int, int]: ...
+
 
 class FakeEdgeSource:
     def __init__(self, events: list[EdgeEvent]):
@@ -51,6 +53,9 @@ class FakeEdgeSource:
         # Return all remaining deterministically
         ev, self._events = self._events, []
         return ev
+
+    def read_current_levels(self) -> dict[int, int]:
+        return {}
 
 
 class LibgpiodEdgeSource(IGpioEdgeSource):
@@ -113,3 +118,15 @@ class LibgpiodEdgeSource(IGpioEdgeSource):
             out.append(EdgeEvent(channel_id=ch, timestamp_ns=int(ev.timestamp_ns), edge=edge))
 
         return out
+
+    def read_current_levels(self) -> dict[int, int]:
+        if self._request is None:
+            return {}
+        result = {}
+        for ch, offset in self._offset_by_channel.items():
+            try:
+                value = self._request.get_value(offset)
+                result[ch] = int(value)
+            except Exception:
+                result[ch] = 0
+        return result
