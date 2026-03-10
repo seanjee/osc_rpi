@@ -263,12 +263,14 @@ class Controller(QtCore.QObject):
 
     def _sampling_loop(self):
         refresh_period = 1.0 / max(1, self.osc_cfg.display.refresh_rate)
-        last_refresh_ns = time.time_ns()
+        # libgpiod edge timestamps are monotonic (boot-time). Keep our internal
+        # timeline monotonic as well to avoid mixing epoch time with monotonic.
+        last_refresh_ns = time.monotonic_ns()
 
         while not self._stop.is_set():
             events = self._edge_source.read_events(timeout_s=0.005)
 
-            now_ns = time.time_ns()
+            now_ns = time.monotonic_ns()
 
             for ev in events:
                 if not self.enabled_channels.get(ev.channel_id, True):
@@ -316,7 +318,7 @@ class Controller(QtCore.QObject):
                 else:
                     self._freeze_until_ns = None
 
-            now_ns = time.time_ns()
+            now_ns = time.monotonic_ns()
             if (now_ns - last_refresh_ns) >= int(refresh_period * 1e9):
                 now_refresh_ns = now_ns
 
@@ -376,19 +378,31 @@ class Controller(QtCore.QObject):
             xs: list[float] = []
             ys: list[float] = []
 
-            # Find the level just before t0_ns
-            prev_level = None
+            # Determine the level at the left edge (t0_ns).
+            # Stored points represent the level AFTER the edge.
+            prev_level: int | None = None
+            first_in_window: tuple[int, int] | None = None
             for t_ns, level in pts:
                 if t_ns < t0_ns:
                     prev_level = level
+                    continue
+                first_in_window = (t_ns, level)
+                break
 
-            # If we have a previous level, add a point at t0_ns with that level
+            if prev_level is None and first_in_window is not None:
+                # If the first event we see is an edge inside the window, the
+                # level just before that edge must be the opposite.
+                prev_level = 1 - int(first_in_window[1])
+
             if prev_level is not None:
                 xs.append(0.0)
-                ys.append(prev_level)
+                ys.append(int(prev_level))
+                last_level = int(prev_level)
+            else:
+                last_level = None
 
-            # Add points within the window
-            for t_ns, level in pts:
+            # Add step points within the window.
+            for t_ns, level_after in pts:
                 if t_ns < t0_ns:
                     continue
                 x_s = (t_ns - t0_ns) / 1e9
@@ -396,13 +410,28 @@ class Controller(QtCore.QObject):
                     continue
                 if x_s > window_s:
                     continue
-                xs.append(x_s)
-                ys.append(level)
+                level_after = int(level_after)
 
-            # If we have points, add a point at the end of the window with the last level
-            if xs:
+                if last_level is None:
+                    # No baseline yet; start at this level.
+                    xs.append(x_s)
+                    ys.append(level_after)
+                elif level_after != last_level:
+                    # Vertical transition at this timestamp.
+                    xs.append(x_s)
+                    ys.append(last_level)
+                    xs.append(x_s)
+                    ys.append(level_after)
+                else:
+                    xs.append(x_s)
+                    ys.append(level_after)
+
+                last_level = level_after
+
+            # Extend to the right edge so the trace fills the viewport.
+            if xs and last_level is not None:
                 xs.append(window_s)
-                ys.append(ys[-1])
+                ys.append(int(last_level))
 
             if xs:
                 traces[ch] = (xs, ys)

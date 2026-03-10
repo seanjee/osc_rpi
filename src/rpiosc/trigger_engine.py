@@ -71,7 +71,12 @@ class TriggerEngine:
         self._single_done = False
 
     def process(self, events: list[EdgeEvent]) -> TriggerDecision | None:
-        now_ns = time.time_ns()
+        # libgpiod timestamps are monotonic; use event time when available so
+        # holdoff logic is consistent even if wall-clock time jumps.
+        if events:
+            now_ns = max(int(ev.timestamp_ns) for ev in events)
+        else:
+            now_ns = time.monotonic_ns()
 
         if self._mode == TriggerMode.SINGLE and self._single_done:
             return None
