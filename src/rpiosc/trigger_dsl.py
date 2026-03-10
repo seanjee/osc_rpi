@@ -171,8 +171,10 @@ class _Parser:
             base = ChannelEdge(ch_num, Edge.FALLING)
         elif self.consume("Both"):
             self.skip_ws()
-            if not self.consume("Edges"):
-                raise ParseError("Expected 'Edges' after 'Both'", self.pos)
+            # Accept both forms:
+            # - "CH1 Both" (shorthand)
+            # - "CH1 Both Edges" (explicit)
+            _ = self.consume("Edges")
             base = ChannelEdge(ch_num, Edge.BOTH)
         else:
             base = ChannelEdge(ch_num, Edge.RISING)

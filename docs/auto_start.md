@@ -1,9 +1,21 @@
+如何启动：
+cd /home/sean/osc_rpi && ./run_rpiosc.sh
+或者
+cd /home/sean/osc_rpi && PYTHONPATH=src .venv/bin/python -m rpiosc.app
+
+
 ~/.config/systemd/user/rpiosc.service
 
 1) 先确认启动命令
 你现在手动能跑的命令一般是：
 
-cd /home/sean/osc_rpi && PYTHONPATH=src python -m rpiosc.app
+cd /home/sean/osc_rpi && . .venv/bin/activate && PYTHONPATH=src python -m rpiosc.app
+
+更推荐（不依赖 activate，避免跑到系统 Python）：
+
+cd /home/sean/osc_rpi && PYTHONPATH=src .venv/bin/python -m rpiosc.app
+
+注意：路径是 osc_rpi（下划线），不是 osc-rpi（中划线）。
 如果你需要 X11/Wayland 图形界面，必须在“图形会话已登录”后启动（systemd user service 正是这样）。
 
 2) 创建 systemd 用户服务
@@ -21,6 +33,21 @@ systemctl --user start rpiosc.service
 查看日志（排障用）：
 
 journalctl --user -u rpiosc.service -f
+
+5) 常见坑：重启后“手动运行功能不正确”
+
+如果你启用了 rpiosc.service，那么开机登录后它可能已经在后台启动并占用了 GPIO lines。
+这时你再手动运行一次，会出现 GPIO Device or resource busy，程序会退回到 FakeEdgeSource，表现为：
+- 左上没有实时波形
+- 触发不工作/触发记录异常
+
+排查方法：
+- pgrep -af "rpiosc.app"  看是否有多个实例
+- systemctl --user status rpiosc.service  看服务是否在跑
+
+解决方式（二选一）：
+- 只手动运行：systemctl --user disable --now rpiosc.service
+- 只让它自启：不要再手动启动第二个实例；需要重启服务可用 systemctl --user restart rpiosc.service
 4) 确保“自动登录”已开启
 如果你用的是 GNOME（Ubuntu 默认），在登录界面设置里开启自动登录；或编辑：
 

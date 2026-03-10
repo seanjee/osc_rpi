@@ -192,7 +192,17 @@ class Controller(QtCore.QObject):
 
         try:
             return LibgpiodEdgeSource(chip_path=chip, lines_by_channel=lines)
-        except Exception:
+        except Exception as e:
+            # Make failures visible: this otherwise degrades silently and looks
+            # like "no waveform / no trigger".
+            try:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                msg = f"{ts}  GPIO init failed ({type(e).__name__}: {e}). Using FakeEdgeSource"
+                self._trigger_lines.insert(0, TriggerLogLine(timestamp=ts, text=msg))
+                self._trigger_lines = self._trigger_lines[: self._trigger_lines_max]
+                self.state.triggerlog_updated.emit(self._trigger_lines)
+            except Exception:
+                pass
             return FakeEdgeSource([])
 
     def start(self):
