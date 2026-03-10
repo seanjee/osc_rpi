@@ -14,7 +14,7 @@ from rpiosc.gpio_driver import FakeEdgeSource, LibgpiodEdgeSource
 from rpiosc.metrics import ProcMetricsProvider
 from rpiosc.models import TriggerMode
 from rpiosc.storage import CsvTriggerLogWriter, TriggerRecord
-from rpiosc.trigger_dsl import parse_expression
+from rpiosc.trigger_dsl import ParseError, parse_expression
 from rpiosc.trigger_engine import TriggerEngine
 from rpiosc.ui_controls import Viewport, timebase_down, timebase_up
 
@@ -54,7 +54,17 @@ class Controller(QtCore.QObject):
         trig_cfg = load_trigger_conditions("config/trigger_conditions.yaml")
         self.trigger_condition_text = trig_cfg.active_expression
 
-        self.expr = parse_expression(self.trigger_condition_text)
+        # Parse trigger expression from config. If invalid, fall back to a safe default
+        # and surface the error in the Trigger Log so the UI still starts.
+        try:
+            self.expr = parse_expression(self.trigger_condition_text)
+        except ParseError as e:
+            bad = self.trigger_condition_text
+            self.trigger_condition_text = "CH1 Rising"
+            self.expr = parse_expression(self.trigger_condition_text)
+            self._append_trigger_log(
+                f"TrigCond ParseError at pos {e.position}: {e}. Using default '{self.trigger_condition_text}'. Bad expr: '{bad}'"
+            )
 
         self.trigger_position_div = 2.5
         self.trigger_marker_channel = self.osc_cfg.trigger.default_channel
@@ -93,6 +103,19 @@ class Controller(QtCore.QObject):
         self._edge_source = self._make_edge_source()
 
         self._publish_control_state()
+
+    def _append_trigger_log(self, message: str) -> None:
+        try:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            text = f"{ts}  {message}"
+            self._trigger_lines.insert(0, TriggerLogLine(timestamp=ts, text=text))
+            self._trigger_lines = self._trigger_lines[: self._trigger_lines_max]
+            self.state.triggerlog_updated.emit(self._trigger_lines)
+        except Exception:
+            return
+
+    def log_message(self, message: str) -> None:
+        self._append_trigger_log(message)
 
     def _trim_screenshots_keep_last(self, keep_last: int) -> None:
         keep_last = int(keep_last)
@@ -196,11 +219,9 @@ class Controller(QtCore.QObject):
             # Make failures visible: this otherwise degrades silently and looks
             # like "no waveform / no trigger".
             try:
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-                msg = f"{ts}  GPIO init failed ({type(e).__name__}: {e}). Using FakeEdgeSource"
-                self._trigger_lines.insert(0, TriggerLogLine(timestamp=ts, text=msg))
-                self._trigger_lines = self._trigger_lines[: self._trigger_lines_max]
-                self.state.triggerlog_updated.emit(self._trigger_lines)
+                self._append_trigger_log(
+                    f"GPIO init failed ({type(e).__name__}: {e}). Using FakeEdgeSource"
+                )
             except Exception:
                 pass
             return FakeEdgeSource([])
@@ -268,7 +289,15 @@ class Controller(QtCore.QObject):
 
     def set_trigger_condition(self, text: str) -> None:
         text = str(text).strip()
-        expr = parse_expression(text)
+        try:
+            expr = parse_expression(text)
+        except ParseError as e:
+            # Keep current expression unchanged; surface the error to the user.
+            self._append_trigger_log(
+                f"TrigCond ParseError at pos {e.position}: {e}. Expr: '{text}'"
+            )
+            raise
+
         self.trigger_condition_text = text
         self.expr = expr
         self.engine.set_expr(expr)

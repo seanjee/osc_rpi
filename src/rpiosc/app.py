@@ -6,6 +6,7 @@ import pyqtgraph as pg
 from rpiosc.config_loader import load_osc_config
 from rpiosc.controller import AppState, Controller
 from rpiosc.models import TriggerMode
+from rpiosc.trigger_dsl import ParseError
 
 
 class OscMainWindow(QtWidgets.QMainWindow):
@@ -391,10 +392,19 @@ def main():
     win.btn_clear_trigger_log.clicked.connect(ctrl.clear_trigger_records)
 
     def _apply_trigger_condition() -> None:
+        text = win.trigger_condition_edit.text()
         try:
-            ctrl.set_trigger_condition(win.trigger_condition_edit.text())
-        except Exception:
-            pass
+            ctrl.set_trigger_condition(text)
+        except ParseError:
+            # Controller logs details to the Trigger Log; keep UI running.
+            return
+        except Exception as e:
+            # Unexpected errors should also be visible.
+            try:
+                ctrl.log_message(f"TrigCond apply failed ({type(e).__name__}: {e}). Expr: '{text.strip()}'")
+            except Exception:
+                pass
+            return
 
     win.trigger_condition_apply.clicked.connect(_apply_trigger_condition)
     win.trigger_condition_edit.returnPressed.connect(_apply_trigger_condition)
