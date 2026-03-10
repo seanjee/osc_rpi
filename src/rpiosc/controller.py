@@ -362,8 +362,8 @@ class Controller(QtCore.QObject):
                     )
                 )
 
-                self._frozen_traces = self._build_traces(decision.timestamp_ns, anchor="trigger")
-                self.state.snapshot_traces_updated.emit(self._frozen_traces, ts)
+                snapshot_traces = self._build_traces(decision.timestamp_ns, anchor="trigger")
+                self.state.snapshot_traces_updated.emit(snapshot_traces, ts)
 
                 QtCore.QMetaObject.invokeMethod(
                     self.state,
@@ -378,9 +378,19 @@ class Controller(QtCore.QObject):
                     QtCore.Qt.QueuedConnection,
                     QtCore.Q_ARG(str, ts),
                 )
+
+                # Live-view freezing policy:
+                # - AUTO: briefly freeze the live view so the user can see the event, then resume.
+                # - NORMAL: do not freeze the live view (continue rolling).
+                # - SINGLE: freeze indefinitely (typical single-shot behavior).
                 if self.engine.mode == TriggerMode.AUTO:
-                    self._freeze_until_ns = decision.timestamp_ns + int(2.0 * 1e9)
+                    self._frozen_traces = snapshot_traces
+                    self._freeze_until_ns = time.monotonic_ns() + int(2.0 * 1e9)
+                elif self.engine.mode == TriggerMode.SINGLE:
+                    self._frozen_traces = snapshot_traces
+                    self._freeze_until_ns = None
                 else:
+                    self._frozen_traces = None
                     self._freeze_until_ns = None
 
             now_ns = time.monotonic_ns()
@@ -400,11 +410,21 @@ class Controller(QtCore.QObject):
                             self._edge_history.setdefault(ch, []).append((now_ns, int(level), False))
 
                 if self._frozen_traces is not None:
-                    if self.engine.mode == TriggerMode.AUTO and self._freeze_until_ns is not None:
-                        if now_refresh_ns >= self._freeze_until_ns:
-                            self._frozen_traces = None
-                            self._freeze_until_ns = None
-                            self.last_trigger_ns = None
+                    # If mode changed to something that shouldn't freeze, unfreeze immediately.
+                    if self.engine.mode not in (TriggerMode.AUTO, TriggerMode.SINGLE):
+                        self._frozen_traces = None
+                        self._freeze_until_ns = None
+                        self.last_trigger_ns = None
+
+                    if (
+                        self._frozen_traces is not None
+                        and self.engine.mode == TriggerMode.AUTO
+                        and self._freeze_until_ns is not None
+                        and now_refresh_ns >= self._freeze_until_ns
+                    ):
+                        self._frozen_traces = None
+                        self._freeze_until_ns = None
+                        self.last_trigger_ns = None
                     if self._frozen_traces is not None:
                         self.state.waveform_updated.emit(self._frozen_traces)
                         last_refresh_ns = now_refresh_ns

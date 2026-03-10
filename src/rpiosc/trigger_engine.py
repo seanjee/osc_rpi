@@ -97,15 +97,16 @@ class TriggerEngine:
         self._ingest(events)
 
         if self._evaluate(self._expr, new_edges=self._edges_seen_this_batch):
-            return self._fire("TRIGGER")
+            return self._fire("TRIGGER", now_ns=now_ns)
 
         return None
 
-    def _fire(self, reason: str) -> TriggerDecision:
-        # Use the edge event timestamp from _get_trigger_timestamp
-        trigger_ts = self._get_trigger_timestamp()
+    def _fire(self, reason: str, *, now_ns: int) -> TriggerDecision:
+        # Always keep timestamps in the monotonic timebase (libgpiod event timestamps / time.monotonic_ns)
+        # so holdoff and window comparisons remain valid.
+        trigger_ts = self._get_trigger_timestamp(self._expr)
         if trigger_ts is None:
-            trigger_ts = time.time_ns()
+            trigger_ts = int(now_ns)
 
         ch, edge = self._get_trigger_source(trigger_ts)
         detail = ""
@@ -146,22 +147,13 @@ class TriggerEngine:
             return ch, kind
         return None, None
 
-    def _get_trigger_timestamp(self) -> int | None:
-        """Get the timestamp of the edge event that caused the trigger."""
-        # Check which edge(s) in the current batch caused the trigger
-        if isinstance(self._expr, ChannelEdge):
-            if self._expr.edge == Edge.BOTH:
-                # For BOTH edges, use the most recent edge timestamp from the batch
-                ch_edges = self._last_edge_ns_by_ch.get(self._expr.channel, {})
-                if not ch_edges:
-                    return None
-                # Return the most recent edge timestamp
-                return max(ch_edges.values())
-            else:
-                # For single edge type, return that edge's timestamp
-                kind = _edge_to_kind(self._expr.edge)
-                return self._last_edge_ns_by_ch.get(self._expr.channel, {}).get(kind)
-        return None
+    def _get_trigger_timestamp(self, expr: Expr) -> int | None:
+        """Best-effort timestamp for the expression that caused the trigger.
+
+        For timing/window expressions (WithinAfter/WithinBefore), this returns the timestamp of the inner
+        edge expression so the snapshot aligns with the actual triggering edge.
+        """
+        return _expr_last_edge_ns(self._last_edge_ns_by_ch, expr)
 
     def _consume_edges_for_trigger(self, expr: Expr) -> None:
         if isinstance(expr, ChannelEdge):
