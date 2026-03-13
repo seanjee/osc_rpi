@@ -39,7 +39,7 @@ gpio_channels:
 sampling:
   max_frequency: 1000000  # 1 Msps
   depth: 100000  # 100k points
-  default_time_scale: 2000  # μs/div
+  default_time_scale: 5000  # μs/div
 
 # 界面配置
 display:

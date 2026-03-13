@@ -67,16 +67,23 @@ class LibgpiodEdgeSource(IGpioEdgeSource):
         self._chip: "gpiod.Chip | None" = None
         self._request: "gpiod.LineRequest | None" = None
         self._offset_by_channel: dict[int, int] = {}
+        self._last_values_by_channel: dict[int, int] = {}
 
     def start(self) -> None:
         # gpiod v2 API: request_lines() returns a LineRequest used for wait/read.
         self._chip = gpiod.Chip(self._chip_path)
         config: dict[int, gpiod.LineSettings] = {}
         for offset in self._lines_by_channel.values():
-            s = gpiod.LineSettings(edge_detection=gpiod.line.Edge.BOTH)
+            # Ensure the line is configured as input. Some platforms/drivers may
+            # raise or return unreliable values from get_value() otherwise.
+            s = gpiod.LineSettings(
+                direction=gpiod.line.Direction.INPUT,
+                edge_detection=gpiod.line.Edge.BOTH,
+            )
             config[offset] = s
         self._request = self._chip.request_lines(config, consumer="rpiosc", event_buffer_size=4096)
         self._offset_by_channel = {ch: offset for ch, offset in self._lines_by_channel.items()}
+        self._last_values_by_channel = {}
 
     def stop(self) -> None:
         if self._request is not None:
@@ -86,6 +93,7 @@ class LibgpiodEdgeSource(IGpioEdgeSource):
                 pass
         self._request = None
         self._offset_by_channel.clear()
+        self._last_values_by_channel.clear()
         if self._chip is not None:
             try:
                 self._chip.close()
@@ -115,6 +123,12 @@ class LibgpiodEdgeSource(IGpioEdgeSource):
                 edge = EdgeKind.RISING
             else:
                 edge = EdgeKind.FALLING
+            # Cache the post-edge level so snapshots can infer baseline even if
+            # reading current levels fails.
+            if edge == EdgeKind.RISING:
+                self._last_values_by_channel[ch] = 1
+            else:
+                self._last_values_by_channel[ch] = 0
             out.append(EdgeEvent(channel_id=ch, timestamp_ns=int(ev.timestamp_ns), edge=edge))
 
         return out
@@ -126,7 +140,11 @@ class LibgpiodEdgeSource(IGpioEdgeSource):
         for ch, offset in self._offset_by_channel.items():
             try:
                 value = self._request.get_value(offset)
-                result[ch] = int(value)
+                v = int(value)
+                result[ch] = v
+                self._last_values_by_channel[ch] = v
             except Exception:
-                result[ch] = 0
+                # Do not force a wrong level; fall back to last known value.
+                if ch in self._last_values_by_channel:
+                    result[ch] = int(self._last_values_by_channel[ch])
         return result
