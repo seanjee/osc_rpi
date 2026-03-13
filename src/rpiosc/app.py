@@ -23,6 +23,7 @@ class OscMainWindow(QtWidgets.QMainWindow):
 
         # Left-top: waveform
         self.plot = pg.PlotWidget()
+        self.plot.setObjectName("main_plot")
         self.plot.showGrid(x=True, y=True)
         self.plot.setYRange(-0.1, 1.3)
         self.plot.setXRange(0.0, 0.005, padding=0.0)
@@ -162,6 +163,7 @@ class OscMainWindow(QtWidgets.QMainWindow):
 
         # Right-top: snapshot
         self.snapshot_plot = pg.PlotWidget()
+        self.snapshot_plot.setObjectName("snapshot_plot")
         self.snapshot_plot.showGrid(x=True, y=True)
         self.snapshot_plot.setYRange(-0.1, 1.3)
         self.snapshot_plot.setXRange(0.0, 0.005, padding=0.0)
@@ -263,6 +265,7 @@ class OscMainWindow(QtWidgets.QMainWindow):
         if secs_per_div is not None:
             span = secs_per_div * 5.0
             self.plot.setXRange(0.0, span, padding=0.0)
+            self.snapshot_plot.setXRange(0.0, span, padding=0.0)
 
     def _parse_timebase_seconds_per_div(self, s: str) -> float | None:
         try:

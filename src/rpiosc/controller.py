@@ -179,22 +179,35 @@ class Controller(QtCore.QObject):
             if w is None:
                 return
 
-            # Ensure the UI has had a chance to repaint with the latest snapshot.
+            # Prefer grabbing the left-top plot widget directly. This is more reliable
+            # than full-window screen grabbing and matches the "main screen" requirement.
+            pm = None
             try:
-                w.repaint()
-                QtWidgets.QApplication.processEvents()
+                main_plot = w.findChild(QtWidgets.QWidget, "main_plot") if w is not None else None
+                if main_plot is not None:
+                    main_plot.repaint()
+                    QtWidgets.QApplication.processEvents()
+                    pm = main_plot.grab()
             except Exception:
-                pass
+                pm = None
 
-            screen = w.screen() or QtGui.QGuiApplication.primaryScreen()
-            if screen is None:
-                return
+            if pm is None or pm.isNull():
+                # Fallback: grab the whole window.
+                try:
+                    w.repaint()
+                    QtWidgets.QApplication.processEvents()
+                except Exception:
+                    pass
 
-            pm = screen.grabWindow(w.winId())
-            if pm.isNull():
-                pm = w.grab()
-            if pm.isNull():
-                return
+                screen = w.screen() or QtGui.QGuiApplication.primaryScreen()
+                if screen is None:
+                    return
+
+                pm = screen.grabWindow(w.winId())
+                if pm.isNull():
+                    pm = w.grab()
+                if pm.isNull():
+                    return
 
             out = pm.toImage()
             if out.isNull():
