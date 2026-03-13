@@ -117,7 +117,7 @@ class Controller(QtCore.QObject):
 
         # Pending trigger capture: delay snapshot/freeze until we have post-trigger samples.
         # Values are in time.monotonic_ns() domain for the deadline.
-        self._pending_trigger: tuple[int, int, str] | None = None  # (trigger_ts_ns, deadline_mono_ns, ts_str)
+        self._pending_trigger: tuple[int, int, str, str] | None = None  # (trigger_ts_ns, deadline_mono_ns, ts_str, status_base)
 
         self._io_queue: queue.Queue[tuple[str, QtGui.QImage, str]] = queue.Queue()
 
@@ -125,9 +125,10 @@ class Controller(QtCore.QObject):
 
         self._publish_control_state()
 
-    def _append_trigger_log(self, message: str) -> None:
+    def _append_trigger_log(self, message: str, *, ts: str | None = None) -> None:
         try:
-            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            if ts is None:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             text = f"{ts}  {message}"
             self._trigger_lines.insert(0, TriggerLogLine(timestamp=ts, text=text))
             self._trigger_lines = self._trigger_lines[: self._trigger_lines_max]
@@ -389,17 +390,7 @@ class Controller(QtCore.QObject):
 
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                 detail = (decision.detail or "").strip()
-                status = (decision.reason + (f" {detail}" if detail else "")).strip()
-
-                # Record trigger immediately (log + CSV). Snapshot/freeze happens after post-trigger window is captured.
-                self._append_trigger_log(status)
-                self.log_writer.append(
-                    TriggerRecord(
-                        timestamp=ts,
-                        condition=self.trigger_condition_text,
-                        status=status,
-                    )
-                )
+                status_base = (decision.reason + (f" {detail}" if detail else "")).strip()
 
                 # Delay snapshot until enough post-trigger time has elapsed so the window contains both
                 # pre-trigger and post-trigger samples.
@@ -407,7 +398,7 @@ class Controller(QtCore.QObject):
                 pre_ns = int((self.trigger_position_div / 5.0) * window_ns)
                 post_ns = max(0, window_ns - pre_ns)
                 deadline_mono = time.monotonic_ns() + int(post_ns)
-                self._pending_trigger = (int(decision.timestamp_ns), int(deadline_mono), ts)
+                self._pending_trigger = (int(decision.timestamp_ns), int(deadline_mono), ts, status_base)
 
             now_ns = time.monotonic_ns()
             if (now_ns - last_refresh_ns) >= int(refresh_period * 1e9):
@@ -415,8 +406,27 @@ class Controller(QtCore.QObject):
 
                 # Finalize pending snapshot once we've captured enough post-trigger data.
                 if self._pending_trigger is not None:
-                    trig_ts_ns, deadline_mono_ns, trig_ts_str = self._pending_trigger
+                    trig_ts_ns, deadline_mono_ns, trig_ts_str, status_base = self._pending_trigger
                     if now_refresh_ns >= deadline_mono_ns:
+                        # Count falling edges in the visible window.
+                        window_ns = int(self.viewport.seconds_per_div * 5.0 * 1e9)
+                        pre_ns = int((self.trigger_position_div / 5.0) * window_ns)
+                        t0_ns = int(trig_ts_ns) - int(pre_ns)
+                        t1_ns = int(t0_ns) + int(window_ns)
+                        ch1_fall = _count_falling_edges_in_window(self._edge_history.get(1, []), t0_ns, t1_ns)
+                        ch2_fall = _count_falling_edges_in_window(self._edge_history.get(2, []), t0_ns, t1_ns)
+                        status = f"{status_base}  FALL_CNT: CH1={ch1_fall} CH2={ch2_fall}"
+
+                        # Record trigger now (log + CSV) so it includes the edge counts.
+                        self._append_trigger_log(status, ts=trig_ts_str)
+                        self.log_writer.append(
+                            TriggerRecord(
+                                timestamp=trig_ts_str,
+                                condition=self.trigger_condition_text,
+                                status=status,
+                            )
+                        )
+
                         snapshot_traces = self._build_traces(trig_ts_ns, anchor="trigger")
                         self.state.snapshot_traces_updated.emit(snapshot_traces, trig_ts_str)
 
@@ -598,6 +608,24 @@ class Controller(QtCore.QObject):
                 self._io_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
+
+
+def _count_falling_edges_in_window(
+    pts: list[tuple[int, int, bool]],
+    t0_ns: int,
+    t1_ns: int,
+) -> int:
+    # Edge points from gpiod are stored as (timestamp_ns, level_after_edge, is_edge).
+    # A falling edge is represented by an edge point where level_after_edge == 0.
+    n = 0
+    for t_ns, level, is_edge in pts:
+        if not is_edge:
+            continue
+        if t_ns < t0_ns or t_ns > t1_ns:
+            continue
+        if int(level) == 0:
+            n += 1
+    return n
 
 
 def _preferred_marker_channel(expr: Expr) -> int | None:
