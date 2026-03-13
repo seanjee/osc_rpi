@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
@@ -307,9 +309,33 @@ class OscMainWindow(QtWidgets.QMainWindow):
 
 
 def main():
+    def _next_run_version(counter_path: str = "logs/run_version.txt") -> int:
+        p = Path(counter_path)
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        prev = 0
+        try:
+            prev = int(p.read_text(encoding="utf-8").strip())
+        except Exception:
+            prev = 0
+
+        v = prev + 1
+        try:
+            p.write_text(str(v), encoding="utf-8")
+        except Exception:
+            # Best-effort; title can still show the computed version.
+            pass
+        return v
+
     app = QtWidgets.QApplication([])
     state = AppState()
     win = OscMainWindow(state)
+
+    run_v = _next_run_version()
+    win.setWindowTitle(f"RPi5 Oscilloscope (rpiosc) v{run_v}")
 
     ctrl = Controller(state)
     osc_cfg = load_osc_config("config/osc_config.yaml")

@@ -14,7 +14,18 @@ from rpiosc.gpio_driver import FakeEdgeSource, LibgpiodEdgeSource
 from rpiosc.metrics import ProcMetricsProvider
 from rpiosc.models import TriggerMode
 from rpiosc.storage import CsvTriggerLogWriter, TriggerRecord
-from rpiosc.trigger_dsl import ParseError, parse_expression
+from rpiosc.trigger_dsl import (
+    And,
+    ChannelEdge,
+    ChannelLevel,
+    Expr,
+    Not,
+    Or,
+    ParseError,
+    WithinAfter,
+    WithinBefore,
+    parse_expression,
+)
 from rpiosc.trigger_engine import TriggerEngine
 from rpiosc.ui_controls import Viewport, timebase_down, timebase_up
 
@@ -47,10 +58,16 @@ class Controller(QtCore.QObject):
         self.state = state
         self._stop = threading.Event()
 
-        self.viewport = Viewport(seconds_per_div=1e-3)
+        self.osc_cfg = load_osc_config("config/osc_config.yaml")
+        try:
+            default_us_per_div = int(self.osc_cfg.sampling.default_time_scale_us_per_div)
+            default_s_per_div = max(1e-9, default_us_per_div * 1e-6)
+        except Exception:
+            default_s_per_div = 2e-3
+
+        self.viewport = Viewport(seconds_per_div=default_s_per_div)
         self.enabled_channels: dict[int, bool] = {1: True, 2: True, 3: True, 4: True}
 
-        self.osc_cfg = load_osc_config("config/osc_config.yaml")
         trig_cfg = load_trigger_conditions("config/trigger_conditions.yaml")
         self.trigger_condition_text = trig_cfg.active_expression
 
@@ -97,6 +114,10 @@ class Controller(QtCore.QObject):
 
         self._frozen_traces: dict[int, tuple[list[float], list[float]]] | None = None
         self._freeze_until_ns: int | None = None
+
+        # Pending trigger capture: delay snapshot/freeze until we have post-trigger samples.
+        # Values are in time.monotonic_ns() domain for the deadline.
+        self._pending_trigger: tuple[int, int, str] | None = None  # (trigger_ts_ns, deadline_mono_ns, ts_str)
 
         self._io_queue: queue.Queue[tuple[str, QtGui.QImage, str]] = queue.Queue()
 
@@ -334,12 +355,19 @@ class Controller(QtCore.QObject):
                 while pts and pts[0][0] < cutoff_ns:
                     pts.pop(0)
 
-            decision = self.engine.process(events)
+            # If we are currently capturing post-trigger data for a pending snapshot, suppress new triggers.
+            decision = None
+            if self._pending_trigger is None:
+                decision = self.engine.process(events)
+
             if decision is not None:
                 self.last_trigger_ns = decision.timestamp_ns
 
-                # If we can infer a trigger channel, use it for marker coloring.
-                if decision.channel_id is not None:
+                # Prefer marker channel inferred from the trigger condition expression.
+                ch = _preferred_marker_channel(self.expr)
+                if ch is not None:
+                    self.trigger_marker_channel = int(ch)
+                elif decision.channel_id is not None:
                     self.trigger_marker_channel = int(decision.channel_id)
 
                 window_s = self.viewport.seconds_per_div * 5.0
@@ -348,54 +376,66 @@ class Controller(QtCore.QObject):
 
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
                 detail = (decision.detail or "").strip()
-                text = f"{ts}  {decision.reason}" + (f"  {detail}" if detail else "")
-                line = TriggerLogLine(timestamp=ts, text=text)
-                self._trigger_lines.insert(0, line)
-                self._trigger_lines = self._trigger_lines[: self._trigger_lines_max]
-                self.state.triggerlog_updated.emit(self._trigger_lines)
+                status = (decision.reason + (f" {detail}" if detail else "")).strip()
 
+                # Record trigger immediately (log + CSV). Snapshot/freeze happens after post-trigger window is captured.
+                self._append_trigger_log(status)
                 self.log_writer.append(
                     TriggerRecord(
                         timestamp=ts,
                         condition=self.trigger_condition_text,
-                        status=(decision.reason + (f" {detail}" if detail else "")),
+                        status=status,
                     )
                 )
 
-                snapshot_traces = self._build_traces(decision.timestamp_ns, anchor="trigger")
-                self.state.snapshot_traces_updated.emit(snapshot_traces, ts)
-
-                QtCore.QMetaObject.invokeMethod(
-                    self.state,
-                    "snapshot_updated",
-                    QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(QtGui.QImage, QtGui.QImage()),
-                    QtCore.Q_ARG(str, ts),
-                )
-                QtCore.QMetaObject.invokeMethod(
-                    self,
-                    "_save_trigger_screenshot",
-                    QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(str, ts),
-                )
-
-                # Live-view freezing policy:
-                # - AUTO: briefly freeze the live view so the user can see the event, then resume.
-                # - NORMAL: do not freeze the live view (continue rolling).
-                # - SINGLE: freeze indefinitely (typical single-shot behavior).
-                if self.engine.mode == TriggerMode.AUTO:
-                    self._frozen_traces = snapshot_traces
-                    self._freeze_until_ns = time.monotonic_ns() + int(2.0 * 1e9)
-                elif self.engine.mode == TriggerMode.SINGLE:
-                    self._frozen_traces = snapshot_traces
-                    self._freeze_until_ns = None
-                else:
-                    self._frozen_traces = None
-                    self._freeze_until_ns = None
+                # Delay snapshot until enough post-trigger time has elapsed so the window contains both
+                # pre-trigger and post-trigger samples.
+                window_ns = int(window_s * 1e9)
+                pre_ns = int((self.trigger_position_div / 5.0) * window_ns)
+                post_ns = max(0, window_ns - pre_ns)
+                deadline_mono = time.monotonic_ns() + int(post_ns)
+                self._pending_trigger = (int(decision.timestamp_ns), int(deadline_mono), ts)
 
             now_ns = time.monotonic_ns()
             if (now_ns - last_refresh_ns) >= int(refresh_period * 1e9):
                 now_refresh_ns = now_ns
+
+                # Finalize pending snapshot once we've captured enough post-trigger data.
+                if self._pending_trigger is not None:
+                    trig_ts_ns, deadline_mono_ns, trig_ts_str = self._pending_trigger
+                    if now_refresh_ns >= deadline_mono_ns:
+                        snapshot_traces = self._build_traces(trig_ts_ns, anchor="trigger")
+                        self.state.snapshot_traces_updated.emit(snapshot_traces, trig_ts_str)
+
+                        QtCore.QMetaObject.invokeMethod(
+                            self.state,
+                            "snapshot_updated",
+                            QtCore.Qt.QueuedConnection,
+                            QtCore.Q_ARG(QtGui.QImage, QtGui.QImage()),
+                            QtCore.Q_ARG(str, trig_ts_str),
+                        )
+                        QtCore.QMetaObject.invokeMethod(
+                            self,
+                            "_save_trigger_screenshot",
+                            QtCore.Qt.QueuedConnection,
+                            QtCore.Q_ARG(str, trig_ts_str),
+                        )
+
+                        # Apply live-view freezing policy once snapshot is ready.
+                        if self.engine.mode == TriggerMode.AUTO:
+                            self._frozen_traces = snapshot_traces
+                            self._freeze_until_ns = time.monotonic_ns() + int(2.0 * 1e9)
+                        elif self.engine.mode == TriggerMode.SINGLE:
+                            self._frozen_traces = snapshot_traces
+                            self._freeze_until_ns = None
+                        elif self.engine.mode == TriggerMode.NORMAL:
+                            self._frozen_traces = snapshot_traces
+                            self._freeze_until_ns = None
+                        else:
+                            self._frozen_traces = None
+                            self._freeze_until_ns = None
+
+                        self._pending_trigger = None
 
                 # Read current GPIO levels and add to history for channels without recent edges
                 current_levels = self._edge_source.read_current_levels()
@@ -545,6 +585,25 @@ class Controller(QtCore.QObject):
                 self._io_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
+
+
+def _preferred_marker_channel(expr: Expr) -> int | None:
+    # Prefer the anchor channel for timing expressions so "... after/before CH1 ..." is marked on CH1.
+    if isinstance(expr, ChannelEdge):
+        return int(expr.channel)
+    if isinstance(expr, ChannelLevel):
+        return int(expr.channel)
+    if isinstance(expr, WithinAfter):
+        return _preferred_marker_channel(expr.anchor) or _preferred_marker_channel(expr.expr)
+    if isinstance(expr, WithinBefore):
+        return _preferred_marker_channel(expr.anchor) or _preferred_marker_channel(expr.expr)
+    if isinstance(expr, Not):
+        return _preferred_marker_channel(expr.expr)
+    if isinstance(expr, And):
+        return _preferred_marker_channel(expr.left) or _preferred_marker_channel(expr.right)
+    if isinstance(expr, Or):
+        return _preferred_marker_channel(expr.left) or _preferred_marker_channel(expr.right)
+    return None
 
 
 def _fmt_timebase(seconds_per_div: float) -> str:

@@ -150,16 +150,24 @@ class TriggerEngine:
     def _get_trigger_timestamp(self, expr: Expr) -> int | None:
         """Best-effort timestamp for the expression that caused the trigger.
 
-        For timing/window expressions (WithinAfter/WithinBefore), this returns the timestamp of the inner
-        edge expression so the snapshot aligns with the actual triggering edge.
+        For timing/window expressions:
+        - WithinAfter: align to the inner edge (expr), i.e. the edge that occurs within the window.
+        - WithinBefore: align to the anchor edge, i.e. the edge whose arrival makes the condition knowable.
         """
+        if isinstance(expr, WithinBefore):
+            return _expr_last_edge_ns(self._last_edge_ns_by_ch, expr.anchor)
         return _expr_last_edge_ns(self._last_edge_ns_by_ch, expr)
 
     def _consume_edges_for_trigger(self, expr: Expr) -> None:
         if isinstance(expr, ChannelEdge):
-            kind = _edge_to_kind(expr.edge)
             try:
-                del self._last_edge_ns_by_ch.get(expr.channel, {})[kind]
+                ch_edges = self._last_edge_ns_by_ch.get(expr.channel, {})
+                if expr.edge == Edge.BOTH:
+                    ch_edges.pop(EdgeKind.RISING, None)
+                    ch_edges.pop(EdgeKind.FALLING, None)
+                else:
+                    kind = _edge_to_kind(expr.edge)
+                    ch_edges.pop(kind, None)
             except Exception:
                 pass
             return
@@ -248,6 +256,16 @@ class TriggerEngine:
             )
 
         if isinstance(expr, WithinBefore):
+            # "within ... before ANCHOR" should only be considered at the moment the anchor edge arrives.
+            if isinstance(expr.anchor, ChannelEdge):
+                edges_this_batch = new_edges.get(expr.anchor.channel, set()) if new_edges else set()
+                if expr.anchor.edge == Edge.BOTH:
+                    if not (EdgeKind.RISING in edges_this_batch or EdgeKind.FALLING in edges_this_batch):
+                        return False
+                else:
+                    kind = _edge_to_kind(expr.anchor.edge)
+                    if kind not in edges_this_batch:
+                        return False
             return _within(
                 self._last_edge_ns_by_ch,
                 expr.expr,
